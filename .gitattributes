@@ -1,0 +1,21 @@
+# Normalise line endings in the repository.
+* text=auto
+
+# Scripts and anything bash, the Linux desktop entry or CI reads must keep LF.
+# Checked out with CRLF on Windows, bash fails on every line with
+# "$'\r': command not found" -- including on the Windows CI runner.
+*.sh          text eol=lf
+*.sh.in       text eol=lf
+*.desktop.in  text eol=lf
+*.yml         text eol=lf
+*.plist.in    text eol=lf
+
+# Windows-only files are happiest with CRLF.
+*.ps1  text eol=crlf
+*.rc   text eol=crlf
+*.nsi  text eol=crlf
+
+# Binary assets.
+*.ico   binary
+*.icns  binary
+*.png   binary

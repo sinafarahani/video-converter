@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>${PRODUCT_NAME}</string>
+	<key>CFBundleExecutable</key>
+	<string>${EXECUTABLE_NAME}</string>
+	<key>CFBundleIdentifier</key>
+	<string>${PRODUCT_BUNDLE_IDENTIFIER}</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>${PRODUCT_NAME}</string>
+	<key>CFBundleIconFile</key>
+	<string>converter.icns</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${CONVERTER_VERSION}</string>
+	<key>CFBundleVersion</key>
+	<string>${CONVERTER_VERSION}</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>${CEF_TARGET_SDK}</string>
+	<key>LSFileQuarantineEnabled</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- The app writes only to the folders the user picks, but macOS still
+	     requires a usage description before it will grant access to the
+	     Desktop, Documents or Downloads folders. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>To read and write the video files you select.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>To read and write the video files you select.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>To read and write the video files you select.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>To read and write video files on external drives you select.</string>
+	<!-- Chromium requires this on modern macOS. -->
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

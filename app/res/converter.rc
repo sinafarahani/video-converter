@@ -1,0 +1,43 @@
+#include <windows.h>
+#include "resource.h"
+#include "version.h"  // generated from the CMake project() version
+
+// The application icon, carried over from the JavaFX build so the app keeps its
+// identity in Explorer, the taskbar and the installer.
+IDI_APPICON ICON "converter.ico"
+
+// Version metadata. Without a VERSIONINFO block the exe shows blank fields in
+// its Properties dialog, and some corporate software-inventory tools flag
+// unversioned binaries.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    CONVERTER_VERSION_MAJOR,CONVERTER_VERSION_MINOR,CONVERTER_VERSION_PATCH,0
+ PRODUCTVERSION CONVERTER_VERSION_MAJOR,CONVERTER_VERSION_MINOR,CONVERTER_VERSION_PATCH,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"   // US English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "Sina0"
+            VALUE "FileDescription",  "Video and Audio Compressor and Converter"
+            VALUE "FileVersion",      CONVERTER_VERSION_STRING
+            VALUE "InternalName",     "converter"
+            VALUE "LegalCopyright",   "Sina0"
+            VALUE "OriginalFilename", "converter.exe"
+            VALUE "ProductName",      "Video and Audio Compressor and Converter"
+            VALUE "ProductVersion",   CONVERTER_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

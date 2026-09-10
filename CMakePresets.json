@@ -1,0 +1,88 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "installDir": "${sourceDir}/install/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_MANIFEST_MODE": "OFF"
+      }
+    },
+    {
+      "name": "windows-x64",
+      "displayName": "Windows x64 (MSVC, Ninja)",
+      "description": "Configure once, then build. CEF is downloaded into third_party/ on first configure.",
+      "inherits": "base",
+      "generator": "Ninja Multi-Config",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      }
+    },
+    {
+      "name": "windows-x64-vs",
+      "displayName": "Windows x64 (Visual Studio solution)",
+      "description": "Generates build/windows-x64-vs/converter.slnx to open in Visual Studio 2026.",
+      "inherits": "base",
+      "generator": "Visual Studio 18 2026",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "architecture": { "value": "x64", "strategy": "set" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      }
+    },
+    {
+      "name": "linux-x64",
+      "displayName": "Linux x64 (GCC)",
+      "description": "Single-config Ninja on purpose: CEF's Linux cmake locates libcef.so through CMAKE_BUILD_TYPE, which a multi-config generator leaves empty.",
+      "inherits": "base",
+      "generator": "Ninja",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-linux",
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "macos-arm64",
+      "displayName": "macOS arm64 (AppleClang)",
+      "inherits": "base",
+      "generator": "Ninja Multi-Config",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "PROJECT_ARCH": "arm64",
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      }
+    },
+    {
+      "name": "macos-x64",
+      "displayName": "macOS x86_64 / Intel (AppleClang)",
+      "inherits": "base",
+      "generator": "Ninja Multi-Config",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64",
+        "PROJECT_ARCH": "x86_64",
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-x64-debug",      "configurePreset": "windows-x64",    "configuration": "Debug" },
+    { "name": "windows-x64-release",    "configurePreset": "windows-x64",    "configuration": "Release" },
+    { "name": "windows-x64-vs-debug",   "configurePreset": "windows-x64-vs", "configuration": "Debug" },
+    { "name": "windows-x64-vs-release", "configurePreset": "windows-x64-vs", "configuration": "Release" },
+    { "name": "linux-x64-release",      "configurePreset": "linux-x64",      "configuration": "Release" },
+    { "name": "macos-arm64-release",    "configurePreset": "macos-arm64",    "configuration": "Release" },
+    { "name": "macos-x64-release",      "configurePreset": "macos-x64",      "configuration": "Release" }
+  ]
+}

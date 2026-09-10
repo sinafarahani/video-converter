@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Video Converter
+Name[fa]=مبدل ویدیو
+GenericName=Video and Audio Compressor
+GenericName[fa]=فشرده‌ساز ویدیو و صدا
+Comment=Convert and compress video and audio files to a target size or quality
+Comment[fa]=تبدیل و فشرده‌سازی فایل‌های ویدیویی و صوتی
+Exec=videoconverter %F
+Icon=videoconverter
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=video;audio;convert;compress;ffmpeg;mp4;hevc;
+StartupNotify=true
+StartupWMClass=converter
+MimeType=video/mp4;video/x-matroska;video/x-msvideo;video/quicktime;video/x-flv;video/x-ms-wmv;video/webm;video/mp2t;audio/mpeg;audio/x-wav;audio/flac;audio/ogg;

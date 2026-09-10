@@ -1,0 +1,266 @@
+# Builds Video Converter for Windows, Linux and macOS (Apple Silicon and Intel),
+# and publishes a GitHub release when a v* tag is pushed.
+#
+#   git tag v2.0.1 && git push origin v2.0.1
+#
+# Run it by hand from the Actions tab (workflow_dispatch) to build all four
+# packages as downloadable artifacts without publishing anything.
+#
+# The tag must match the project() VERSION in CMakeLists.txt, and CHANGELOG.md
+# must have a "## [x.y.z]" section for it -- the release notes come from there.
+
+name: Build and release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-x64, os: windows-latest, preset: windows-x64, triplet: x64-windows-static }
+          # The oldest supported LTS on purpose: the binary requires the glibc it
+          # was built against (2.35 here), so it also runs on Ubuntu 22.04+,
+          # Debian 12+ and their derivatives. GCC 12 is installed below because
+          # 22.04's default GCC 11 is thin on C++20.
+          - { platform: linux-x64,   os: ubuntu-22.04,   preset: linux-x64,   triplet: x64-linux }
+          - { platform: macos-arm64, os: macos-latest,   preset: macos-arm64, triplet: arm64-osx }
+          # GitHub's last Intel macOS image, supported until August 2027.
+          - { platform: macos-x64,   os: macos-15-intel, preset: macos-x64,   triplet: x64-osx }
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Version
+        id: ver
+        run: |
+          v=$(sed -n 's/^  VERSION \([0-9][0-9.]*\)$/\1/p' CMakeLists.txt | head -1)
+          [ -n "$v" ] || { echo "::error::could not read the version from CMakeLists.txt"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$v" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match CMakeLists.txt version $v"
+            exit 1
+          fi
+          echo "Building $v"
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build tools
+        run: |
+          case "$RUNNER_OS" in
+            Windows) choco install -y --no-progress ninja nsis ;;
+            Linux)
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq ninja-build libx11-dev gcc-12 g++-12
+              # vcpkg and CMake both honour CC/CXX on Linux.
+              echo "CC=gcc-12"  >> "$GITHUB_ENV"
+              echo "CXX=g++-12" >> "$GITHUB_ENV"
+              ;;
+            macOS)   brew install ninja ;;
+          esac
+
+      - name: Cache CEF and vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/cef
+            ${{ runner.temp }}/vcpkg-cache
+          key: deps-${{ matrix.platform }}-${{ hashFiles('cmake/DownloadCEF.cmake') }}-v1
+
+      - name: vcpkg
+        run: |
+          VCPKG="$RUNNER_TEMP/vcpkg"
+          git clone -q --depth 1 https://github.com/microsoft/vcpkg "$VCPKG"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cmd //c "$(cygpath -w "$VCPKG/bootstrap-vcpkg.bat")" -disableMetrics
+          else
+            "$VCPKG/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          mkdir -p "$RUNNER_TEMP/vcpkg-cache"
+          # Written after the MSVC step on purpose: Visual Studio's environment
+          # sets VCPKG_ROOT to the vcpkg bundled with VS, which is manifest-only.
+          echo "VCPKG_ROOT=$VCPKG" >> "$GITHUB_ENV"
+          export VCPKG_DEFAULT_BINARY_CACHE="$RUNNER_TEMP/vcpkg-cache"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
+          "$VCPKG/vcpkg" install nlohmann-json spdlog fmt --triplet ${{ matrix.triplet }}
+
+      # Through bash explicitly: Git on Windows does not record the executable
+      # bit, so the script cannot be relied on to be directly runnable.
+      - name: FFmpeg
+        run: bash scripts/fetch-ffmpeg.sh ${{ matrix.platform }}
+
+      - name: Configure
+        run: |
+          cmake --preset ${{ matrix.preset }} \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}-release
+
+      # The engine on its own, driven by the convctl harness: proves the
+      # process layer, the bundled ffmpeg and the audio pairing actually work on
+      # this OS, not merely that the code compiles.
+      - name: Engine tests
+        run: |
+          cmake -S . -B build/tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCONVERTER_ENGINE_ONLY=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          cmake --build build/tests
+          cd build/tests/tools/convctl
+          cp -R "$GITHUB_WORKSPACE/third_party/ffmpeg/." .
+          ./convctl size | tail -4
+          if [ "$RUNNER_OS" = Windows ]; then ./convctl quote | tail -1; fi
+          mkdir -p t/in t/out
+          ./ffmpeg -nostdin -y -v error \
+            -f lavfi -i "testsrc2=size=640x360:rate=25" \
+            -f lavfi -i "sine=frequency=330:sample_rate=48000" \
+            -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+            -f lavfi -i "anullsrc=r=48000:cl=mono" \
+            -filter_complex "[1:a]volume=0.2[L];[2:a]volume=0.16[R]" \
+            -map 0:v -map "[L]" -map "[R]" -map 3:a \
+            -t 6 -c:v libx264 -preset ultrafast -c:a pcm_s16le -shortest t/in/pair.mkv
+          ./convctl probe t/in/pair.mkv | tee probe.txt
+          grep -q "output audio streams: 1" probe.txt
+          ./convctl run t/in --out t/out --size 1MB --fast --cpu | tr '\r' '\n' | grep "done:" | tee run.txt
+          grep -q "1 converted" run.txt
+
+      - name: Package
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          out="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$out"
+          stage="build/${{ matrix.preset }}/app/Release"
+
+          case "${{ matrix.platform }}" in
+            windows-x64)
+              cd installer
+              "/c/Program Files (x86)/NSIS/makensis.exe" -DVERSION="$v" \
+                -DSOURCE_DIR="..\\build\\windows-x64\\app\\Release" converter.nsi
+              mv "VideoConverter-$v-windows-x64-setup.exe" "$out/"
+              cd ..
+              name="VideoConverter-$v-windows-x64-portable"
+              cp -R "$stage" "$RUNNER_TEMP/$name"
+              (cd "$RUNNER_TEMP" && 7z a -tzip -mx=7 "$out/$name.zip" "$name" > /dev/null)
+              ;;
+
+            linux-x64)
+              for f in ffmpeg/LICENSE.txt ffmpeg/FFMPEG-SOURCE-OFFER.txt; do
+                [ -f "$stage/$f" ] || { echo "::error::$f missing from the package"; exit 1; }
+              done
+              name="VideoConverter-$v-linux-x64"
+              cp -a "$stage" "$RUNNER_TEMP/$name"
+              tar -C "$RUNNER_TEMP" -czf "$out/$name.tar.gz" "$name"
+              ;;
+
+            macos-*)
+              src="$stage/converter.app"
+              root="$RUNNER_TEMP/dmg"
+              app="$root/Video Converter.app"
+              mkdir -p "$root"
+              ditto "$src" "$app"
+
+              # Ad-hoc signature, applied inside-out. Apple Silicon will not run
+              # unsigned code at all, and a bundle whose nested code is unsigned
+              # is reported as "damaged". This is not notarisation -- see the
+              # README for the one-time "Open Anyway" step users need.
+              fw="$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+              find "$fw" -name "*.dylib" -exec codesign --force --sign - {} \;
+              codesign --force --sign - "$fw"
+              for h in "$app"/Contents/Frameworks/*Helper*.app; do
+                codesign --force --sign - "$h"
+              done
+              codesign --force --sign - "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
+              codesign --force --sign - "$app"
+              codesign --verify --deep --strict --verbose=2 "$app"
+
+              ln -s /Applications "$root/Applications"
+              hdiutil create -volname "Video Converter" -srcfolder "$root" -ov -format UDZO \
+                "$out/VideoConverter-$v-${{ matrix.platform }}.dmg"
+              ;;
+          esac
+          ls -la "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes and checksums
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '
+            /^## / { if (found) exit; if (index($0, "[" v "]")) { found = 1; next } }
+            found' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for [$v]"
+            exit 1
+          fi
+          cat >> notes.md <<'EOF'
+
+          ---
+
+          **Which file do I need?**
+
+          | Platform | Download |
+          |---|---|
+          | Windows 10/11 (installer, no admin rights needed) | `...-windows-x64-setup.exe` |
+          | Windows, no install | `...-windows-x64-portable.zip` |
+          | macOS, Apple Silicon (M1 and later) | `...-macos-arm64.dmg` |
+          | macOS, Intel | `...-macos-x64.dmg` |
+          | Linux x86-64 | `...-linux-x64.tar.gz` |
+
+          The app is not code-signed by Apple or Microsoft, so Windows SmartScreen
+          and macOS Gatekeeper warn on first launch. The README explains the
+          one-time step to allow it. `SHA256SUMS.txt` lists every file's checksum.
+          EOF
+          sed -i 's/^          //' notes.md
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          ls -la dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Video Converter ${{ github.ref_name }}
+          body_path: notes.md
+          files: dist/*
+          fail_on_unmatched_files: true

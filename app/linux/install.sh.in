@@ -1,0 +1,79 @@
+#!/bin/sh
+# Per-user installer for Video Converter.
+#
+# Mirrors the Windows installer's model: everything lands under the user's own
+# home directory, nothing needs root, and no system paths are touched. Run
+# `./install.sh --uninstall` to reverse it.
+
+set -eu
+
+APP_ID="videoconverter"
+APP_NAME="Video Converter"
+VERSION="@CONVERTER_VERSION@"
+
+PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}"
+INSTALL_DIR="$PREFIX/$APP_ID"
+BIN_DIR="$HOME/.local/bin"
+DESKTOP_DIR="$PREFIX/applications"
+ICON_DIR="$PREFIX/icons/hicolor/256x256/apps"
+
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+uninstall() {
+    echo "Removing $APP_NAME ..."
+    rm -rf "$INSTALL_DIR"
+    rm -f  "$BIN_DIR/$APP_ID"
+    rm -f  "$DESKTOP_DIR/$APP_ID.desktop"
+    rm -f  "$ICON_DIR/$APP_ID.png"
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+    fi
+    echo "Done. Logs and settings in ${XDG_DATA_HOME:-$HOME/.local/share}/VideoConverter were kept."
+    exit 0
+}
+
+[ "${1:-}" = "--uninstall" ] && uninstall
+
+echo "Installing $APP_NAME $VERSION for $(id -un) ..."
+
+# Refuse rather than produce a half-working install the user has to debug.
+if [ ! -x "$SRC_DIR/converter" ]; then
+    echo "error: converter executable not found next to this script" >&2
+    exit 1
+fi
+if [ ! -f "$SRC_DIR/ffmpeg/ffmpeg" ]; then
+    echo "error: ffmpeg/ffmpeg is missing -- this package is incomplete" >&2
+    exit 1
+fi
+
+mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$ICON_DIR"
+
+# Everything except this script and the desktop entry.
+tar -c -C "$SRC_DIR" --exclude=install.sh --exclude="$APP_ID.desktop" . | tar -x -C "$INSTALL_DIR"
+chmod +x "$INSTALL_DIR/converter" "$INSTALL_DIR/ffmpeg/ffmpeg" "$INSTALL_DIR/ffmpeg/ffprobe" 2>/dev/null || true
+
+# A launcher on PATH. The app locates its own resources relative to the real
+# executable, so a symlink here is enough.
+ln -sf "$INSTALL_DIR/converter" "$BIN_DIR/$APP_ID"
+
+if [ -f "$SRC_DIR/$APP_ID.png" ]; then
+    cp "$SRC_DIR/$APP_ID.png" "$ICON_DIR/$APP_ID.png"
+fi
+
+cp "$SRC_DIR/$APP_ID.desktop" "$DESKTOP_DIR/$APP_ID.desktop"
+chmod 644 "$DESKTOP_DIR/$APP_ID.desktop"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t "$PREFIX/icons/hicolor" >/dev/null 2>&1 || true
+fi
+
+echo
+echo "Installed to $INSTALL_DIR"
+case ":$PATH:" in
+    *":$BIN_DIR:"*) echo "Run:  $APP_ID" ;;
+    *) echo "Run:  $BIN_DIR/$APP_ID"
+       echo "note: $BIN_DIR is not on your PATH." ;;
+esac

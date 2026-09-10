@@ -1,0 +1,32 @@
+# Build output
+/build/
+/install/
+/out/
+
+# CEF, if downloaded into the tree rather than supplied via CEF_ROOT
+/third_party/cef/
+
+# Vue
+/ui/node_modules/
+/ui/dist/
+/ui/.vite/
+
+# Installer output
+/installer/*-setup.exe
+
+# Editor / OS
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+Thumbs.db
+.DS_Store
+
+# Chromium writes this into the working directory when it has nowhere else to log
+debug.log
+
+# Local tool locations (vcpkg, CEF, ffmpeg) for this machine only
+CMakeUserPresets.json
+
+# Fetched by scripts/fetch-ffmpeg.sh
+/third_party/ffmpeg/

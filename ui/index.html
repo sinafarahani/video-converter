@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- The page is only ever loaded from the app:// scheme over local files,
+         but a restrictive policy costs nothing and closes off script injection
+         through any filename or path that reaches the DOM. -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'" />
+    <title>مبدل و فشرده‌ساز ویدیو و صدا</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
