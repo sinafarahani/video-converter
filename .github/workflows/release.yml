@@ -175,6 +175,10 @@ jobs:
               done
               name="VideoConverter-$v-linux-x64"
               cp -a "$stage" "$RUNNER_TEMP/$name"
+              # CEF ships libcef.so with full debug info and symbol table: 1.4 GB,
+              # 256 MB without them. The dynamic symbols the app links against
+              # are kept. Local builds keep everything, for debugging.
+              strip --strip-unneeded "$RUNNER_TEMP/$name/libcef.so"
               tar -C "$RUNNER_TEMP" -czf "$out/$name.tar.gz" "$name"
               ;;
 
