@@ -28,6 +28,9 @@ uninstall() {
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
     fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t "$PREFIX/icons/hicolor" >/dev/null 2>&1 || true
+    fi
     echo "Done. Logs and settings in ${XDG_DATA_HOME:-$HOME/.local/share}/VideoConverter were kept."
     exit 0
 }
@@ -60,7 +63,10 @@ if [ -f "$SRC_DIR/$APP_ID.png" ]; then
     cp "$SRC_DIR/$APP_ID.png" "$ICON_DIR/$APP_ID.png"
 fi
 
-cp "$SRC_DIR/$APP_ID.desktop" "$DESKTOP_DIR/$APP_ID.desktop"
+# Exec gets the absolute path instead of relying on ~/.local/bin being on
+# PATH: many desktops add that directory only if it existed at login, so on a
+# fresh account the menu entry would do nothing until the next login.
+sed "s|^Exec=.*|Exec=\"$INSTALL_DIR/converter\" %F|" "$SRC_DIR/$APP_ID.desktop" > "$DESKTOP_DIR/$APP_ID.desktop"
 chmod 644 "$DESKTOP_DIR/$APP_ID.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
