@@ -347,8 +347,22 @@ jobs:
               codesign --verify --deep --strict --verbose=2 "$app"
 
               ln -s /Applications "$root/Applications"
-              hdiutil create -volname "Video Converter" -srcfolder "$root" -ov -format UDZO \
-                "$out/VideoConverter-$v-${{ matrix.platform }}.dmg"
+              # hdiutil on GitHub's macOS runners sometimes fails with "Resource
+              # busy" while a background scanner still holds the source folder;
+              # it is transient, so retry a few times before failing the build.
+              dmg="$out/VideoConverter-$v-${{ matrix.platform }}.dmg"
+              for attempt in 1 2 3 4 5; do
+                if hdiutil create -volname "Video Converter" -srcfolder "$root" -ov -format UDZO "$dmg"; then
+                  break
+                fi
+                rm -f "$dmg"
+                if [ "$attempt" = 5 ]; then
+                  echo "::error::hdiutil failed 5 times"
+                  exit 1
+                fi
+                echo "hdiutil failed (attempt $attempt), retrying in 15 s"
+                sleep 15
+              done
               ;;
           esac
           ls -la "$out"
