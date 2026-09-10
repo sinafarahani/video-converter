@@ -1,5 +1,5 @@
-// The conversion pipeline: walk the input tree, convert each media file,
-// report progress, and stop promptly when cancelled.
+// The conversion pipeline: expand the inputs into media files, convert each
+// one, report progress, and stop promptly when cancelled.
 #pragma once
 
 #include <atomic>
@@ -48,6 +48,8 @@ struct RunSummary {
     int skipped_exists = 0;
     int skipped_small = 0;
     int failed = 0;
+    int skipped_not_media = 0;  // files given directly that are not audio/video
+    int missing = 0;            // inputs that did not exist
     bool cancelled = false;
 };
 
@@ -91,12 +93,52 @@ private:
 // Pieces exposed for testing
 // ---------------------------------------------------------------------------
 
-// Recursively collects every file under `dir`, in directory order.
-std::vector<std::filesystem::path> collect_files(const std::filesystem::path& dir);
+// Recursively collects every regular file under `dir`, sorted by path, so the
+// processing order -- and therefore any " (2)" names -- is the same on every
+// OS rather than whatever order the file system enumerates in. Links to
+// folders (symlinks, junctions) are not followed. A folder that cannot be
+// listed is skipped and added to `unreadable` (when given); the walk goes on
+// with the rest.
+std::vector<std::filesystem::path> collect_files(const std::filesystem::path& dir,
+                                                 std::vector<std::filesystem::path>* unreadable = nullptr);
 
-// Where a given input file's output belongs, given the mode. In CopyTo mode the
-// relative structure under the input root is preserved and parent directories
-// are created.
+// One media file the run will process.
+struct PlannedFile {
+    std::filesystem::path input;   // absolute
+    std::filesystem::path root;    // folder it was found under, or input.parent_path() for a loose file
+    bool video = false;
+    std::filesystem::path output;  // final path incl. .mp4/.mp3 and any " (2)" suffix
+    bool renamed = false;          // true when a " (n)" suffix was added
+    // True when other files of this run map to the same output name (a.avi and
+    // a.mkv -> a.mp4, a (2).mp4). Which of them an existing file came from
+    // cannot be known, so the Skip policy says so instead of a plain skip.
+    bool name_clash = false;
+};
+
+// Everything the run needs to know about its inputs, worked out before any
+// file is touched.
+struct InputPlan {
+    std::vector<PlannedFile> files;                 // media only, in processing order
+    std::vector<std::filesystem::path> missing;     // inputs that do not exist
+    std::vector<std::filesystem::path> not_media;   // files given directly that are not audio/video
+    int duplicates = 0;                             // same file reached twice
+    int ignored_in_folders = 0;                     // non-media files inside folders (silent)
+    int excluded_output_subtree = 0;                // files skipped because they sit in the output folder
+    int found_inputs = 0;                           // inputs that exist (media or not), counted per entry
+    std::vector<std::filesystem::path> unreadable_folders;  // folders the walk could not list
+};
+
+// Expands `s.inputs` (folders and/or files) into the list of media files to
+// process and decides every output name up front, so that no output can land
+// on an input of the same run or on another output. Reads the disk (existence,
+// folder walks) but never writes to it.
+InputPlan plan_inputs(const Settings& s);
+
+// Pure: no disk writes. CopyTo target before the extension is applied.
+std::filesystem::path output_target(const Settings& s, const std::filesystem::path& root,
+                                    const std::filesystem::path& file);
+
+// output_target() plus creating the target's parent directories.
 std::filesystem::path build_output_path(const Settings& s,
                                         const std::filesystem::path& input_root,
                                         const std::filesystem::path& input_file);

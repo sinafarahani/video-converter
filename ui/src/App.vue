@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { invoke, subscribe, type EngineEvent } from './bridge'
+import { invoke, subscribe, type EngineEvent, type InputsEvent } from './bridge'
+import { LogText, type LogEntry } from './logText'
 
 type OutputMode = 'replace' | 'copy'
 type Existing = 'overwrite' | 'skip'
@@ -8,7 +9,9 @@ type Speed = 'optimal' | 'fast'
 type SizeMode = 'manual' | 'auto'
 type Level = 'low' | 'medium' | 'high' | 'extreme'
 
-const inputDir = ref('')
+// Folders and/or audio/video files, in the order given. The engine walks the
+// folders and decides what is media; the UI only holds the list.
+const inputs = ref<string[]>([])
 const outputDir = ref('')
 const maxSize = ref('')
 const outputMode = ref<OutputMode>('replace')
@@ -37,16 +40,21 @@ const encSpeed = ref(0)
 const eta = ref(-1)
 const elapsed = ref(0)
 
-const logLines = ref<string[]>([])
+const logLines = ref<LogEntry[]>([])
 const logEl = ref<HTMLElement | null>(null)
+// A stable key per line, so dropping the oldest ones below does not make Vue
+// redraw every line that is left.
+let logId = 0
 
 // The Java version let its log pane grow without limit for the whole session.
 // A large batch produces thousands of lines, and every one of them stays in the
 // DOM; capping keeps scrolling smooth without losing anything that matters.
 const MAX_LOG_LINES = 2000
 
-function log(text: string) {
-  logLines.value.push(text)
+// `paths` are the exact paths inside `text`, when known, so they can be shown
+// left to right inside the Persian line (see logText.ts).
+function log(text: string, paths?: string[]) {
+  logLines.value.push({ id: logId++, text, paths })
   if (logLines.value.length > MAX_LOG_LINES) {
     logLines.value.splice(0, logLines.value.length - MAX_LOG_LINES)
   }
@@ -79,8 +87,54 @@ watch([maxSize, sizeMode], async () => {
   }
 })
 
+const multiInput = computed(() => inputs.value.length > 1)
+
+function persianDigits(n: number): string {
+  return String(n).replace(/\d/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)])
+}
+
+// One path stays an ordinary editable field, so typing or pasting a folder
+// works exactly as before. A list collapses to a read-only count with every
+// path in the tooltip; telling files from folders would need a disk round
+// trip, so the summary only counts.
+const inputText = computed({
+  get: () =>
+    multiInput.value
+      ? `${persianDigits(inputs.value.length)} مورد انتخاب شده`
+      : (inputs.value[0] ?? ''),
+  set: (text: string) => {
+    if (multiInput.value) return
+    // Not trimmed: that would eat the space while typing "My Clip".
+    inputs.value = text.trim() ? [text] : []
+  },
+})
+const inputTooltip = computed(() => inputs.value.join('\n'))
+
+// Explorer's "Copy as path" puts quotes around the path, and a multi-selection
+// pastes into one line as "a""b" or "a" "b"; surrounding spaces come along
+// with a sloppy copy. Applied when the user finishes editing a field (change
+// fires on blur and Enter, not per keystroke), and only to what was typed: a
+// path from a picker, a drop or the OS is used exactly as given.
+function cleanTypedPaths(text: string): string[] {
+  const t = text.trim()
+  if (/^("[^"]*"\s*)+$/.test(t)) {
+    const quoted = [...t.matchAll(/"([^"]*)"/g)].map((m) => m[1]).filter((p) => p.trim())
+    return [...new Set(quoted)]
+  }
+  return t ? [t] : []
+}
+
+function commitTypedInput() {
+  if (multiInput.value) return
+  inputs.value = cleanTypedPaths(inputs.value[0] ?? '')
+}
+
+function commitTypedOutput() {
+  outputDir.value = cleanTypedPaths(outputDir.value)[0] ?? ''
+}
+
 const canStart = computed(() => {
-  if (!inputDir.value) return false
+  if (inputs.value.length === 0) return false
   if (copyMode.value && !outputDir.value) return false
   if (manualMode.value && (!maxSize.value || !sizeValid.value)) return false
   return ffmpegFound.value
@@ -142,15 +196,41 @@ watch(outputMode, (mode) => {
 
 // -- actions ---------------------------------------------------------------
 
+function logRejected(paths: string[]) {
+  for (const p of paths) log(`نادیده گرفته شد (ویدیو یا صدا نیست یا پیدا نشد): ${p}`, [p])
+}
+
+// Shared by the file picker, drops and paths handed over by the OS. A batch
+// in which nothing survived leaves the current list alone rather than wiping
+// a selection the user may still want; the rejected lines explain why.
+function applyInputs(paths: string[], append: boolean) {
+  if (paths.length === 0) return
+  inputs.value = [...new Set(append ? [...inputs.value, ...paths] : paths)]
+}
+
 async function browse(which: 'input' | 'output') {
   try {
     const r = await invoke<{ cancelled: boolean; path: string }>('pickFolder', {
       title: which === 'input' ? 'پوشه ورودی را انتخاب کنید' : 'پوشه خروجی را انتخاب کنید',
-      initial: which === 'input' ? inputDir.value : outputDir.value,
+      initial: which === 'input' ? (inputs.value[0] ?? '') : outputDir.value,
     })
     if (r.cancelled || !r.path) return
-    if (which === 'input') inputDir.value = r.path
+    if (which === 'input') inputs.value = [r.path]
     else outputDir.value = r.path
+  } catch (e) {
+    log(String(e))
+  }
+}
+
+async function pickFiles() {
+  try {
+    const r = await invoke<{ cancelled: boolean; paths?: string[]; rejected?: string[] }>(
+      'pickFiles',
+      { title: 'فایل‌های ویدیو یا صدا را انتخاب کنید', initial: inputs.value[0] ?? '' },
+    )
+    if (r.cancelled) return
+    logRejected(r.rejected ?? [])
+    applyInputs(r.paths ?? [], false)
   } catch (e) {
     log(String(e))
   }
@@ -162,7 +242,7 @@ async function toggleStart() {
     return
   }
   if (!canStart.value) {
-    if (!inputDir.value) log('فیلد پوشه ورودی نمیتواند خالی باشد')
+    if (inputs.value.length === 0) log('هیچ فایل یا پوشه‌ای برای ورودی انتخاب نشده است.')
     else if (copyMode.value && !outputDir.value) log('فیلد پوشه خروجی نمیتواند خالی باشد')
     else if (manualMode.value) log('حداکثر اندازه خروجی نامعتبر است.')
     return
@@ -173,7 +253,10 @@ async function toggleStart() {
 
   try {
     const r = await invoke<{ started: boolean }>('start', {
-      inputDir: inputDir.value,
+      inputs: [...inputs.value],
+      // Still read by the bridge when `inputs` is absent; kept so the field
+      // means the same thing to an older native side.
+      inputDir: inputs.value[0] ?? '',
       outputDir: outputDir.value,
       outputMode: outputMode.value,
       existing: existing.value,
@@ -193,10 +276,53 @@ async function toggleStart() {
 
 let unsubscribe: (() => void) | null = null
 
+// Paths handed over while a batch runs are held back: the input controls are
+// locked, and swapping the list under a running job would make the screen
+// disagree with what is being converted. They take effect once it ends.
+let pendingInputs: { paths: string[]; append: boolean } | null = null
+
+// Explorer starts one process per selected file, so a multi-selection arrives
+// as one replacing batch followed by appending ones. When nothing in the
+// replacing batch survived (the file vanished, say), the replace is still
+// owed: the next batch of the same burst takes its place instead of being
+// added to the old, unrelated list. Only an appending batch reads this, and
+// one of those comes only right after another batch, so it cannot go stale.
+let replaceOwed = false
+
+function onInputs(ev: InputsEvent) {
+  logRejected(ev.rejected ?? [])
+  const paths = ev.paths ?? []
+  if (!ev.append) replaceOwed = paths.length === 0
+  if (paths.length === 0) return
+  const append = ev.append && !replaceOwed
+  replaceOwed = false
+  if (!running.value) {
+    applyInputs(paths, append)
+    return
+  }
+  if (!pendingInputs) log('ورودی جدید دریافت شد؛ پس از پایان عملیات فعلی جایگزین می‌شود.')
+  pendingInputs =
+    pendingInputs && append
+      ? { paths: [...new Set([...pendingInputs.paths, ...paths])], append: pendingInputs.append }
+      : { paths, append }
+}
+
+// Watching `running` rather than only the finished event also covers a start
+// that the native side refused.
+watch(running, (isRunning) => {
+  if (isRunning || !pendingInputs) return
+  const p = pendingInputs
+  pendingInputs = null
+  applyInputs(p.paths, p.append)
+})
+
 function onEvent(ev: EngineEvent) {
   switch (ev.type) {
     case 'log':
-      log(ev.text)
+      log(ev.text, ev.paths)
+      break
+    case 'inputs':
+      onInputs(ev)
       break
     case 'progress':
       progress.value = ev.fraction
@@ -222,7 +348,81 @@ function onEvent(ev: EngineEvent) {
   }
 }
 
+// -- drag and drop ---------------------------------------------------------
+//
+// DOM File objects carry only names, so the absolute paths come from C++,
+// which records them when the drag enters the window (CefDragHandler) and
+// hands them over through takeDroppedPaths. CEF calls OnDragEnter only for an
+// Alloy-style browser, which is why app.cc creates the window and browser in
+// Alloy style; under Chrome style takeDroppedPaths would always be empty.
+
+const dragging = ref(false)
+const dropActive = computed(() => dragging.value && !running.value)
+
+function isFileDrag(e: DragEvent): boolean {
+  return e.dataTransfer?.types.includes('Files') ?? false
+}
+
+function onDragEnter(e: DragEvent) {
+  e.preventDefault()
+  if (isFileDrag(e)) dragging.value = true
+}
+
+// Cancelling dragover makes the page the drop target and cancelling drop
+// stops Chromium's default of opening the dropped file as a page; both are
+// needed on every event, including the ones we then ignore.
+function onDragOver(e: DragEvent) {
+  e.preventDefault()
+  const files = isFileDrag(e)
+  // Also brings the overlay back if something below cleared it too early.
+  if (files) dragging.value = true
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = files && !running.value ? 'copy' : 'none'
+  }
+}
+
+// dragleave fires for every element crossed; moving to another element names
+// it in relatedTarget, and only leaving the page leaves it empty. (Counting
+// enters against leaves goes wrong for good when the element under the
+// pointer is removed mid-drag: its dragleave no longer reaches the window.)
+function onDragLeave(e: DragEvent) {
+  if (e.relatedTarget === null) dragging.value = false
+}
+
+// A job ending removes the current-file line; if the pointer leaves the
+// window straight from it, that last dragleave is lost as well.
+watch(running, () => {
+  dragging.value = false
+})
+
+async function onDrop(e: DragEvent) {
+  e.preventDefault()
+  dragging.value = false
+  // Only a file drag refreshes the native side's list; asking after any other
+  // drop could return the paths of an earlier drag that left the window.
+  if (!isFileDrag(e) || running.value) return
+  try {
+    const r = await invoke<{ paths?: string[]; rejected?: string[] }>('takeDroppedPaths')
+    const paths = r.paths ?? []
+    const rejected = r.rejected ?? []
+    // The paths come from the window's native drag handler. If it saw none,
+    // say so rather than let the drop silently do nothing.
+    if (paths.length === 0 && rejected.length === 0) {
+      log('مسیر فایل‌های رهاشده در دسترس نبود؛ از دکمه «انتخاب فایل» یا «انتخاب پوشه» استفاده کنید.')
+      return
+    }
+    logRejected(rejected)
+    applyInputs(paths, false)
+  } catch (err) {
+    log(String(err))
+  }
+}
+
 onMounted(async () => {
+  window.addEventListener('dragenter', onDragEnter)
+  window.addEventListener('dragover', onDragOver)
+  window.addEventListener('dragleave', onDragLeave)
+  window.addEventListener('drop', onDrop)
   unsubscribe = subscribe(onEvent)
   try {
     const s = await invoke<{ ffmpegFound: boolean; running: boolean }>('getState')
@@ -234,24 +434,40 @@ onMounted(async () => {
   }
 })
 
-onUnmounted(() => unsubscribe?.())
+onUnmounted(() => {
+  window.removeEventListener('dragenter', onDragEnter)
+  window.removeEventListener('dragover', onDragOver)
+  window.removeEventListener('dragleave', onDragLeave)
+  window.removeEventListener('drop', onDrop)
+  unsubscribe?.()
+})
 </script>
 
 <template>
   <div class="shell">
-    <main class="card">
-      <!-- input directory -->
+    <main class="card" :class="{ 'drop-target': dropActive }">
+      <!-- input: a folder, audio/video files, or a mix -->
       <div class="row">
-        <label class="label" for="in">پوشه ورودی:</label>
+        <label class="label" for="in">پوشه یا فایل ورودی:</label>
         <input
           id="in"
-          v-model="inputDir"
+          v-model="inputText"
           class="field"
+          :class="{ multi: multiInput }"
           type="text"
-          placeholder="یک پوشه انتخاب کنید"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="یک پوشه یا چند فایل انتخاب کنید، یا آن‌ها را اینجا رها کنید"
+          :title="inputTooltip"
+          :readonly="multiInput"
           :disabled="running"
+          @change="commitTypedInput"
         />
-        <button class="btn" :disabled="running" @click="browse('input')">جستجو</button>
+        <button v-if="multiInput" class="btn small" :disabled="running" @click="inputs = []">
+          پاک کردن
+        </button>
+        <button class="btn" :disabled="running" @click="browse('input')">انتخاب پوشه</button>
+        <button class="btn" :disabled="running" @click="pickFiles">انتخاب فایل</button>
       </div>
 
       <!-- size mode -->
@@ -279,6 +495,8 @@ onUnmounted(() => unsubscribe?.())
           class="field short"
           :class="{ invalid: manualMode && maxSize !== '' && !sizeValid }"
           type="text"
+          spellcheck="false"
+          autocomplete="off"
           :placeholder="sizePlaceholder"
           :disabled="running || !manualMode"
         />
@@ -332,7 +550,10 @@ onUnmounted(() => unsubscribe?.())
           v-model="outputDir"
           class="field"
           type="text"
+          spellcheck="false"
+          autocomplete="off"
           :disabled="running || !copyMode"
+          @change="commitTypedOutput"
         />
         <button class="btn" :disabled="running || !copyMode" @click="browse('output')">
           جستجو
@@ -401,10 +622,14 @@ onUnmounted(() => unsubscribe?.())
         <p v-if="detailLine" class="detail">{{ detailLine }}</p>
       </div>
 
-      <!-- log -->
-      <div ref="logEl" class="log" dir="auto">
-        <div v-for="(line, i) in logLines" :key="i" class="log-line">{{ line }}</div>
+      <!-- log: every message is Persian, so the pane stays right-to-left (from
+           <html dir>) even when a line starts with a Latin word such as
+           "ffmpeg"; paths inside the lines are isolated by LogText. -->
+      <div ref="logEl" class="log">
+        <div v-for="line in logLines" :key="line.id" class="log-line"><LogText :entry="line" /></div>
       </div>
+
+      <div v-if="dropActive" class="drop-hint">فایل‌ها یا پوشه‌ها را اینجا رها کنید</div>
     </main>
 
     <footer class="dev">developed by Sina0</footer>

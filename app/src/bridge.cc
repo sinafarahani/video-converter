@@ -1,7 +1,11 @@
 #include "bridge.h"
 
 #include <atomic>
+#include <filesystem>
 #include <mutex>
+#include <span>
+#include <string_view>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -37,28 +41,137 @@ conv::CompressionLevel level_from(const std::string& s) {
     return conv::CompressionLevel::Medium;
 }
 
-// Completes a pickFolder query once the native dialog is dismissed.
+// Reads one string argument. nlohmann's value() throws type_error when the key
+// holds another type, and nothing catches an exception inside OnQuery, so every
+// argument goes through here instead.
+std::string str_arg(const json& obj, const char* key, const char* fallback = "") {
+    const auto it = obj.find(key);  // end() when obj is not an object at all
+    return (it != obj.end() && it->is_string()) ? it->get<std::string>() : std::string(fallback);
+}
+
+// dump() throws on a string that is not valid UTF-8, which a Linux file name is
+// allowed to be. Replacing the bad bytes beats losing the whole event.
+std::string dump(const json& j) {
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+bool is_media_file(const std::filesystem::path& p) {
+    const std::string ext = conv::lower_extension(p);
+    return conv::is_video_extension(ext) || conv::is_audio_extension(ext);
+}
+
+struct Classified {
+    json paths    = json::array();
+    json rejected = json::array();
+};
+
+// The one rule shared by drop, the file picker, the command line and a second
+// launch: an existing folder, or an existing file with an audio/video
+// extension, is kept. Anything else -- missing, not media, a device -- comes
+// back as rejected, so the page can say what it ignored.
+//
+// Touches the disk, so never call it on the UI thread: use classify_async.
+Classified classify(const std::vector<std::string>& utf8_paths) {
+    Classified out;
+    for (const std::string& s : utf8_paths) {
+        if (s.empty()) continue;
+        const std::filesystem::path p = conv::path_from_utf8(s);
+        std::error_code ec;
+        const auto st   = std::filesystem::status(p, ec);
+        const bool keep = !ec && (std::filesystem::is_directory(st) ||
+                                  (std::filesystem::is_regular_file(st) && is_media_file(p)));
+        (keep ? out.paths : out.rejected).push_back(s);
+    }
+    return out;
+}
+
+// Runs classify() on a CEF file thread and |done| with the result back on the
+// UI thread.
+//
+// One status() call on a sleeping network drive or an unreachable share can
+// block for the SMB timeout. On the UI thread that would freeze the window,
+// and during a relaunch also the launching process, which waits on the
+// singleton hand-off until the running app returns. The file runner is a
+// single thread and the UI thread runs its tasks in order, so results arrive
+// in the order the lists were handed in.
+void classify_async(std::vector<std::string> utf8_paths,
+                    base::OnceCallback<void(Classified)> done) {
+    CefPostTask(TID_FILE_USER_VISIBLE,
+                base::BindOnce(
+                    [](std::vector<std::string> paths, base::OnceCallback<void(Classified)> cb) {
+                        CefPostTask(TID_UI, base::BindOnce(std::move(cb), classify(paths)));
+                    },
+                    std::move(utf8_paths), std::move(done)));
+}
+
+// {paths, rejected} -- the reply to takeDroppedPaths and, with "cancelled"
+// added, to pickFiles.
+json paths_reply(Classified c) {
+    json out;
+    out["paths"]    = std::move(c.paths);
+    out["rejected"] = std::move(c.rejected);
+    return out;
+}
+
+// The file picker deliberately gets no accept_filters, so it shows every
+// file; the reply re-checks the selection and reports non-media files as
+// rejected. CEF 151 offers no usable media filter: it drops the documented
+// "description|.ext;.ext" form, and a list of plain extensions becomes one
+// dialog entry per extension with the first pre-selected -- the picker would
+// open showing .mp4 files only and hide everything else. (Checked on Windows by
+// reading the dialog's file-type list, and through the Linux portal.)
+std::vector<CefString> media_accept_filters() {
+    return {};
+}
+
+// Completes a pickFolder or pickFiles query once the native dialog is
+// dismissed.
 //
 // CEF's own dialog is used rather than IFileDialog / GTK / NSOpenPanel so that
 // one code path covers Windows, Linux and macOS, each still getting its real
 // native picker.
-class FolderDialogCallback : public CefRunFileDialogCallback {
+class PathsDialogCallback : public CefRunFileDialogCallback {
 public:
-    explicit FolderDialogCallback(CefRefPtr<CefMessageRouterBrowserSide::Callback> callback)
-        : callback_(std::move(callback)) {}
+    // |media_only|: the pickFiles reply, {cancelled, paths, rejected}, with the
+    // selection re-checked. Otherwise the pickFolder reply, {cancelled, path,
+    // paths}, passed through as chosen.
+    PathsDialogCallback(CefRefPtr<CefMessageRouterBrowserSide::Callback> callback, bool media_only)
+        : callback_(std::move(callback)), media_only_(media_only) {}
 
     void OnFileDialogDismissed(const std::vector<CefString>& paths) override {
+        std::vector<std::string> utf8;
+        utf8.reserve(paths.size());
+        for (const CefString& p : paths) utf8.push_back(p.ToString());
+
+        const bool cancelled = utf8.empty();
+        if (media_only_) {
+            // The filter only narrows what the dialog lists; a typed name or an
+            // "all files" entry still gets through, so check again.
+            classify_async(std::move(utf8),
+                           base::BindOnce(
+                               [](CefRefPtr<CefMessageRouterBrowserSide::Callback> cb,
+                                  bool none, Classified c) {
+                                   json out         = paths_reply(std::move(c));
+                                   out["cancelled"] = none;
+                                   cb->Success(dump(out));
+                               },
+                               callback_, cancelled));
+            return;
+        }
+
         json out;
-        out["cancelled"] = paths.empty();
-        out["path"]      = paths.empty() ? std::string{} : paths.front().ToString();
-        callback_->Success(out.dump());
+        out["cancelled"] = cancelled;
+        out["path"]      = cancelled ? std::string{} : utf8.front();
+        out["paths"]     = utf8;
+        callback_->Success(dump(out));
     }
 
 private:
     CefRefPtr<CefMessageRouterBrowserSide::Callback> callback_;
+    bool                                             media_only_;
 
-    IMPLEMENT_REFCOUNTING(FolderDialogCallback);
-    DISALLOW_COPY_AND_ASSIGN(FolderDialogCallback);
+    IMPLEMENT_REFCOUNTING(PathsDialogCallback);
+    DISALLOW_COPY_AND_ASSIGN(PathsDialogCallback);
 };
 
 }  // namespace
@@ -72,13 +185,45 @@ struct Bridge::Impl {
     CefRefPtr<Callback> events;
     int64_t             events_query_id = 0;
 
+    // `inputs` events waiting for the page to subscribe, oldest first. UI
+    // thread only.
+    std::vector<std::string> pending_events;
+
+    // Paths from the last OnDragEnter, waiting for the page's drop. UI thread
+    // only.
+    std::vector<std::string> drag_paths;
+
+    // Set by Shutdown, so an `inputs` event still being checked on the file
+    // thread is dropped instead of queued for a page that has gone. UI thread
+    // only.
+    bool shut_down = false;
+
     // Pushes one event to the page. A persistent query stays open after
     // Success(), so this can be called as many times as there are events.
     //
     // Silently drops events when nothing is subscribed, which happens between
-    // the browser being created and the Vue app mounting.
+    // the browser being created and the Vue app mounting. Engine events cannot
+    // occur then; inputs go through EmitOrBuffer instead.
     void Emit(const std::string& payload) {
         if (events) events->Success(payload);
+    }
+
+    // Like Emit, but keeps the event until the page is listening. Also queues
+    // while an earlier backlog is still waiting to be flushed, so events always
+    // reach the page in the order they were raised.
+    void EmitOrBuffer(std::string payload) {
+        if (events && pending_events.empty()) {
+            events->Success(payload);
+        } else {
+            pending_events.push_back(std::move(payload));
+        }
+    }
+
+    void FlushPending() {
+        if (!events) return;  // unsubscribed again before this ran; keep them
+        std::vector<std::string> queued;
+        queued.swap(pending_events);
+        for (const std::string& payload : queued) events->Success(payload);
     }
 
     Impl()
@@ -107,7 +252,59 @@ void Bridge::Shutdown() {
         impl_->runner->cancel();
         impl_->runner->join();
     }
-    impl_->events = nullptr;
+    impl_->shut_down = true;
+    impl_->events    = nullptr;
+    impl_->pending_events.clear();
+    impl_->drag_paths.clear();
+}
+
+void Bridge::SetDragPaths(std::vector<std::string> utf8_paths) {
+    if (!CefCurrentlyOn(TID_UI)) {
+        std::weak_ptr<Bridge> weak = shared_from_this();
+        CefPostTask(TID_UI, base::BindOnce(
+                                [](std::weak_ptr<Bridge> w, std::vector<std::string> paths) {
+                                    if (auto self = w.lock()) self->SetDragPaths(std::move(paths));
+                                },
+                                weak, std::move(utf8_paths)));
+        return;
+    }
+    impl_->drag_paths = std::move(utf8_paths);
+}
+
+void Bridge::DeliverInputs(std::vector<std::string> utf8_paths,
+                           const std::string& source,
+                           bool append) {
+    if (!CefCurrentlyOn(TID_UI)) {
+        std::weak_ptr<Bridge> weak = shared_from_this();
+        CefPostTask(TID_UI, base::BindOnce(
+                                [](std::weak_ptr<Bridge> w, std::vector<std::string> paths,
+                                   std::string src, bool add) {
+                                    if (auto self = w.lock()) {
+                                        self->DeliverInputs(std::move(paths), src, add);
+                                    }
+                                },
+                                weak, std::move(utf8_paths), source, append));
+        return;
+    }
+
+    // Checked off the UI thread, so a relaunch hand-off returns at once. Every
+    // delivery takes this same route, in order, so a burst's replace-then-
+    // append sequence survives; |append| was decided on arrival and travels
+    // with the paths.
+    std::weak_ptr<Bridge> weak = shared_from_this();
+    classify_async(std::move(utf8_paths),
+                   base::BindOnce(
+                       [](std::weak_ptr<Bridge> w, std::string src, bool add, Classified c) {
+                           auto self = w.lock();
+                           if (!self || self->impl_->shut_down) return;
+                           const json event{{"type", "inputs"},
+                                            {"paths", std::move(c.paths)},
+                                            {"rejected", std::move(c.rejected)},
+                                            {"source", src},
+                                            {"append", add}};
+                           self->impl_->EmitOrBuffer(dump(event));
+                       },
+                       weak, source, append));
 }
 
 bool Bridge::OnQuery(CefRefPtr<CefBrowser> browser,
@@ -125,9 +322,14 @@ bool Bridge::OnQuery(CefRefPtr<CefBrowser> browser,
         callback->Failure(400, std::string("bad request: ") + e.what());
         return true;
     }
+    if (!req.is_object()) {
+        callback->Failure(400, "bad request: not an object");
+        return true;
+    }
 
-    const std::string cmd = req.value("cmd", "");
-    const json args = req.contains("args") ? req["args"] : json::object();
+    const std::string cmd = str_arg(req, "cmd");
+    const auto args_it    = req.find("args");
+    const json args = (args_it != req.end() && args_it->is_object()) ? *args_it : json::object();
 
     // ---- the event channel -------------------------------------------------
     if (cmd == "subscribe") {
@@ -137,6 +339,18 @@ bool Bridge::OnQuery(CefRefPtr<CefBrowser> browser,
         }
         impl_->events          = callback;
         impl_->events_query_id = query_id;
+
+        // Hand over whatever arrived before the page was listening. Posted
+        // rather than sent from here, so Success() is never called on this
+        // query from inside its own OnQuery.
+        if (!impl_->pending_events.empty()) {
+            std::weak_ptr<Bridge> weak = shared_from_this();
+            CefPostTask(TID_UI, base::BindOnce(
+                                    [](std::weak_ptr<Bridge> w) {
+                                        if (auto self = w.lock()) self->impl_->FlushPending();
+                                    },
+                                    weak));
+        }
         return true;  // held open; no Success() until there is an event
     }
 
@@ -147,31 +361,51 @@ bool Bridge::OnQuery(CefRefPtr<CefBrowser> browser,
         out["ffmpeg"]      = conv::path_to_utf8(impl_->tools.ffmpeg);
         out["running"]     = impl_->runner->running();
         out["logDir"]      = conv::path_to_utf8(user_data_dir() / "logs");
-        callback->Success(out.dump());
+        callback->Success(dump(out));
         return true;
     }
 
-    if (cmd == "pickFolder") {
+    if (cmd == "pickFolder" || cmd == "pickFiles") {
         if (!browser || !browser->GetHost()) {
             callback->Failure(500, "no browser host");
             return true;
         }
-        // Asynchronous: Success() is delivered from OnFileDialogDismissed.
-        browser->GetHost()->RunFileDialog(FILE_DIALOG_OPEN_FOLDER,
-                                          args.value("title", ""),
-                                          args.value("initial", ""),
-                                          std::vector<CefString>{},
-                                          new FolderDialogCallback(callback));
+        // There is no dialog mode that takes files and folders together, hence
+        // two commands. Asynchronous: Success() is delivered from
+        // OnFileDialogDismissed.
+        const bool files = (cmd == "pickFiles");
+        browser->GetHost()->RunFileDialog(
+            files ? FILE_DIALOG_OPEN_MULTIPLE : FILE_DIALOG_OPEN_FOLDER,
+            str_arg(args, "title"),
+            str_arg(args, "initial"),
+            files ? media_accept_filters() : std::vector<CefString>{},
+            new PathsDialogCallback(callback, /*media_only=*/files));
+        return true;
+    }
+
+    if (cmd == "takeDroppedPaths") {
+        // Taken, not peeked: a later drop that somehow skipped OnDragEnter must
+        // never be answered with this set.
+        std::vector<std::string> dropped;
+        dropped.swap(impl_->drag_paths);
+
+        // Answered once the paths are checked, off the UI thread.
+        classify_async(std::move(dropped),
+                       base::BindOnce(
+                           [](CefRefPtr<Callback> cb, Classified c) {
+                               cb->Success(dump(paths_reply(std::move(c))));
+                           },
+                           callback));
         return true;
     }
 
     if (cmd == "parseSize") {
-        const auto v = conv::parse_size_input(args.value("text", ""));
+        const auto v = conv::parse_size_input(str_arg(args, "text"));
         json out;
         out["valid"] = v.has_value();
         out["bytes"] = v ? *v : 0;
         out["human"] = v ? conv::format_bytes(*v) : "";
-        callback->Success(out.dump());
+        callback->Success(dump(out));
         return true;
     }
 
@@ -188,16 +422,25 @@ bool Bridge::OnQuery(CefRefPtr<CefBrowser> browser,
         }
 
         conv::Settings s;
-        s.input_dir       = conv::path_from_utf8(args.value("inputDir", ""));
-        s.output_dir      = conv::path_from_utf8(args.value("outputDir", ""));
-        s.output_mode     = output_mode_from(args.value("outputMode", "replace"));
-        s.existing_policy = policy_from(args.value("existing", "overwrite"));
-        s.speed           = speed_from(args.value("speed", "optimal"));
-        s.size_mode       = size_mode_from(args.value("sizeMode", "manual"));
-        s.level           = level_from(args.value("level", "medium"));
+        // Folders and/or files, in the order the page lists them. `inputDir` is
+        // the single-folder form an older page sends. What is missing or not
+        // media is the engine's to report, per path, in the log.
+        if (const auto it = args.find("inputs"); it != args.end() && it->is_array()) {
+            for (const json& v : *it) {
+                if (v.is_string()) s.inputs.push_back(conv::path_from_utf8(v.get<std::string>()));
+            }
+        } else if (const std::string dir = str_arg(args, "inputDir"); !dir.empty()) {
+            s.inputs.push_back(conv::path_from_utf8(dir));
+        }
+        s.output_dir      = conv::path_from_utf8(str_arg(args, "outputDir"));
+        s.output_mode     = output_mode_from(str_arg(args, "outputMode", "replace"));
+        s.existing_policy = policy_from(str_arg(args, "existing", "overwrite"));
+        s.speed           = speed_from(str_arg(args, "speed", "optimal"));
+        s.size_mode       = size_mode_from(str_arg(args, "sizeMode", "manual"));
+        s.level           = level_from(str_arg(args, "level", "medium"));
 
         if (s.size_mode == conv::SizeMode::Manual) {
-            const auto bytes = conv::parse_size_input(args.value("maxSize", ""));
+            const auto bytes = conv::parse_size_input(str_arg(args, "maxSize"));
             s.max_size_bytes = bytes.value_or(0);
         }
 
@@ -211,7 +454,7 @@ bool Bridge::OnQuery(CefRefPtr<CefBrowser> browser,
                                     [](std::weak_ptr<Bridge> w, std::string payload) {
                                         if (auto self = w.lock()) self->impl_->Emit(payload);
                                     },
-                                    weak, event.dump()));
+                                    weak, dump(event)));
         };
 
         conv::JobCallbacks cb;
@@ -241,13 +484,15 @@ bool Bridge::OnQuery(CefRefPtr<CefBrowser> browser,
                       {"remuxed", sum.remuxed},
                       {"skipped", sum.skipped_exists},
                       {"failed", sum.failed},
+                      {"notMedia", sum.skipped_not_media},
+                      {"missing", sum.missing},
                       {"cancelled", sum.cancelled}});
         };
 
         const bool started = impl_->runner->start(std::move(s), std::move(cb));
         json out;
         out["started"] = started;
-        callback->Success(out.dump());
+        callback->Success(dump(out));
         return true;
     }
 

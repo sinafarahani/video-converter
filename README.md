@@ -5,7 +5,7 @@
 <h1 align="center">Video Converter</h1>
 
 <p align="center">
-  Shrink and convert whole folders of video and audio — to an exact size or a quality level — in one click.<br>
+  Shrink and convert video and audio — single files or whole folders — to an exact size or a quality level, in one click.<br>
   Windows · macOS · Linux
 </p>
 
@@ -17,12 +17,13 @@
 
 <p align="center"><a href="#راهنمای-فارسی">راهنمای فارسی</a></p>
 
-![Video Converter converting a folder, with live progress](docs/screenshot.png)
+![Video Converter converting a folder and a file, with live progress](docs/screenshot.png)
 
-Point it at a folder, choose how small you want the files, press start. Every
-video inside — including subfolders — becomes an H.265 MP4, and every audio file
-an MP3. It uses your graphics card when that is genuinely faster, keeps only the
-audio tracks that actually contain sound, and shows exactly how far along it is.
+Point it at a folder or a few files — or drop them on the window — choose how
+small you want the files, press start. Every video, including those in
+subfolders, becomes an H.265 MP4, and every audio file an MP3. It uses your
+graphics card when that is genuinely faster, keeps only the audio tracks that
+actually contain sound, and shows exactly how far along it is.
 
 > The interface is in Persian (فارسی). Every control is explained below.
 
@@ -42,12 +43,20 @@ audio tracks that actually contain sound, and shows exactly how far along it is.
   tracks of which only one is live. Every track is measured; silent and
   noise-only tracks are dropped, and a stereo pair stored as two mono tracks
   (the usual broadcast MXF layout) is joined back into one stereo track.
+- **Folders or files** — pick a folder, pick individual files, or mix both.
+  Drag them onto the window, or open them from Explorer, Finder or your file
+  manager with **Open with** (on Windows also by right-clicking a folder, or
+  with **Send to**).
 - **Replace or copy** — overwrite the originals in place, or write the results
   to another folder with the same subfolder structure, skipping or replacing
-  files that are already there.
+  files that are already there. Two results never overwrite each other: the
+  second gets ` (2)` added to its name.
 - **Honest progress** — the current phase, per-file percentage, frames per
   second, speed and time remaining, plus a warning if an encode stalls.
 - **No administrator rights needed** to install, on any platform.
+- **Works offline** — the app makes no network connections at all. Everything,
+  FFmpeg included, runs on your own computer; nothing is uploaded or
+  downloaded.
 - **Wide format support** — MP4, MKV, MOV, AVI, MXF, WebM, WMV, FLV, TS/M2TS,
   3GP, OGV and more for video; MP3, WAV, FLAC, AAC, OGG, Opus, WMA, M4A, APE and
   more for audio.
@@ -76,18 +85,26 @@ both systems warn the first time you open it. This is expected.
 
 Run the setup file. If **"Windows protected your PC"** appears, click
 **More info → Run anyway**. It installs for your user account only — no
-administrator rights — and adds Start menu and desktop shortcuts. Uninstall it
-from *Settings → Apps* like any other program.
+administrator rights — and adds Start menu and desktop shortcuts. It also lists
+the app under **Open with** for video and audio files (without making it the
+default), adds **تبدیل با مبدل ویدیو** (*Convert with Video Converter* if you
+installed in English) to the right-click menu of folders, and adds it to
+**Send to**. Uninstall it from *Settings → Apps* like any other program; that
+removes all of these again.
 
 Prefer not to install? Unzip the portable package anywhere and run
-`converter.exe`.
+`converter.exe`. The portable copy is not registered with Explorer, so it has
+no Open with, folder menu or Send to entries; everything else, drag and drop
+included, works the same.
 
 ### macOS
 
 Open the `.dmg` and drag **Video Converter** into **Applications**. The first
 time you open it, macOS will refuse; go to
 **System Settings → Privacy & Security**, scroll down and click **Open Anyway**.
-You only need to do this once.
+You only need to do this once. From then on Finder lists the app under
+**Open With** for video and audio files, and you can drop files or folders on
+its Dock icon.
 
 If you prefer the Terminal:
 
@@ -104,7 +121,15 @@ cd VideoConverter-*-linux-x64
 ```
 
 This installs into `~/.local` for your user only (no `sudo`) and adds the app to
-your application menu. Run `./install.sh --uninstall` to remove it. Most desktop
+your application menu and to your file manager's **Open with** list for video
+and audio files. Run `./install.sh --uninstall` to remove it.
+
+You can also run `./converter` straight from the extracted folder without
+installing. It works the same, drag and drop, the pickers and command-line
+paths included, but it gets no application-menu or Open with entry and no
+`videoconverter` command.
+
+Most desktop
 distributions already have the libraries it needs; on a minimal system install
 `libnss3 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1
 libxrandr2 libgbm1 libasound2` (names may carry a `t64` suffix on newer Ubuntu).
@@ -113,7 +138,7 @@ libxrandr2 libgbm1 libasound2` (names may carry a `t64` suffix on newer Ubuntu).
 
 | Control | Meaning |
 |---|---|
-| **پوشه ورودی** — Input folder | The folder to process. Subfolders are included. |
+| **پوشه یا فایل ورودی** — Input folder or files | **انتخاب پوشه** (Choose folder) picks a folder, subfolders included; **انتخاب فایل** (Choose files) picks one or more video and audio files. Either one replaces the current input, and so does dropping files and folders onto the window. With several items the field shows how many; **پاک کردن** (Clear) empties it. |
 | **حالت اندازه** — Size mode | **دستی** (Manual): a maximum size per file. **خودکار** (Automatic): a quality level. |
 | **حداکثر اندازه فایل خروجی** — Maximum size | Manual mode. `1GB`, `500MB`, or a bare number (under 16 means GB, otherwise MB). |
 | **سطح فشرده‌سازی** — Compression level | Automatic mode. **کم** (Low, best quality) · **متوسط** (Medium) · **زیاد** (High) · **خیلی زیاد** (Extreme, smallest files). |
@@ -122,10 +147,39 @@ libxrandr2 libgbm1 libasound2` (names may carry a `t64` suffix on newer Ubuntu).
 | **نوع خروجی** — Encoding speed | **بهینه** (Optimal): smallest files, slowest. **سریع** (Fast): quicker, slightly larger. |
 | **شروع / لغو** — Start / Cancel | Cancelling stops immediately and removes any half-written file. |
 
-Files that are neither video nor audio are left alone and are not copied.
+Files that are neither video nor audio are left alone and are not copied. If
+you picked or dropped one directly, the log says so.
+
+**Copy mode layout.** A single input folder's contents go straight into the
+output folder, subfolders and all. With several inputs, each input folder gets
+a subfolder of its own — `out\Day1\…`, `out\Day2\…` (a second folder called
+`Day1` becomes `Day1 (2)`) — and single files go straight into `out\`. If two
+results would get the same name, the second is saved as `name (2).mp4`.
+
+In Replace mode, a file that already has the new name but is not being
+converted (a `clip.mp4` next to the `clip.avi` you convert) is kept, and the
+result is saved as `clip (2).mp4`.
 
 **Tip:** *Optimal* on a CPU is very slow — hours per hour of 1080p footage.
 With a supported graphics card the same job typically takes minutes.
+
+### Opening files from outside the app
+
+- **Drag and drop** files and folders anywhere on the window.
+- **Open with**: right-click a video or audio file and choose
+  **Open with → Video Converter** — in Explorer (installed version), in
+  Finder, or in a Linux file manager after `install.sh`.
+- **Windows folders**: right-click a folder and choose
+  **تبدیل با مبدل ویدیو** (Convert with Video Converter); on Windows 11 it is
+  under *Show more options*. For a mix of files and folders, select them all
+  and use **Send to → Video Converter**.
+- **Command line**: pass files and folders as arguments, e.g.
+  `converter.exe D:\Day1 D:\Day2\clip.mov`, or `videoconverter ~/Videos/Day1`
+  on Linux after `install.sh`.
+
+If the app is already open, whatever you open goes to that window instead of
+starting a second copy, and files opened together arrive as one list. During a
+conversion, newly opened files become the input once it finishes.
 
 ### Where are the logs?
 
@@ -181,7 +235,7 @@ Chromium Embedded Framework (BSD) and others — see
 
 ## راهنمای فارسی
 
-**مبدل ویدیو** پوشه‌های کامل ویدیو و صدا را با یک کلیک تبدیل و فشرده می‌کند — یا دقیقاً تا اندازه‌ای که تعیین می‌کنید، یا با یک سطح کیفیت ثابت. همه ویدیوها (از جمله زیرپوشه‌ها) به MP4 با کدک H.265 و همه فایل‌های صوتی به MP3 تبدیل می‌شوند.
+**مبدل ویدیو** فایل‌های ویدیو و صدا را، چه تک‌تک و چه در پوشه‌های کامل، با یک کلیک تبدیل و فشرده می‌کند — یا دقیقاً تا اندازه‌ای که تعیین می‌کنید، یا با یک سطح کیفیت ثابت. همه ویدیوها (از جمله زیرپوشه‌ها) به MP4 با کدک H.265 و همه فایل‌های صوتی به MP3 تبدیل می‌شوند.
 
 ### امکانات
 
@@ -189,15 +243,17 @@ Chromium Embedded Framework (BSD) and others — see
 - **حالت خودکار:** چهار سطح فشرده‌سازی — کم، متوسط، زیاد و خیلی زیاد — با کیفیت ثابت.
 - **استفاده خودکار از کارت گرافیک** (NVIDIA، AMD، Intel Arc و Apple)، فقط در صورتی که حداقل دو برابر سریع‌تر از پردازنده باشد. کارت‌های گرافیک مجتمع Intel HD/UHD استفاده نمی‌شوند.
 - **انتخاب هوشمند مسیر صوتی:** مسیرهای بی‌صدا یا دارای نویز حذف می‌شوند و فقط مسیرهای دارای صدای واقعی نگه داشته می‌شوند. جفت‌های استریو در فایل‌های MXF به یک مسیر استریو تبدیل می‌شوند.
+- **ورودی پوشه یا فایل:** یک پوشه، یک یا چند فایل ویدیو و صدا، یا ترکیبی از هر دو. فایل‌ها و پوشه‌ها را می‌توانید روی پنجره بکشید و رها کنید، یا از **Open with** و منوی کلیک راست باز کنید.
 - جایگزینی فایل‌های اصلی یا کپی در پوشه‌ای دیگر با حفظ ساختار زیرپوشه‌ها.
 - نمایش مرحله، درصد، سرعت و زمان باقی‌مانده.
 - نصب بدون نیاز به دسترسی مدیر سیستم (Administrator).
+- **کاملاً آفلاین:** برنامه هیچ اتصالی به اینترنت برقرار نمی‌کند؛ همه کارها، از جمله FFmpeg، روی رایانه خودتان انجام می‌شود.
 
 ### دانلود و نصب
 
 فایل مناسب سیستم خود را از بخش **[Releases](https://github.com/sinafarahani/video-converter/releases/latest)** دانلود کنید. FFmpeg همراه برنامه است و نیازی به نصب جداگانه ندارد.
 
-**ویندوز:** فایل `windows-x64-setup.exe` را اجرا کنید. اگر پیغام «Windows protected your PC» نمایش داده شد، روی **More info** و سپس **Run anyway** کلیک کنید. نسخه بدون نصب (`portable.zip`) را هم می‌توانید در هر پوشه‌ای باز کنید و `converter.exe` را اجرا کنید.
+**ویندوز:** فایل `windows-x64-setup.exe` را اجرا کنید. اگر پیغام «Windows protected your PC» نمایش داده شد، روی **More info** و سپس **Run anyway** کلیک کنید. نسخه بدون نصب (`portable.zip`) را هم می‌توانید در هر پوشه‌ای باز کنید و `converter.exe` را اجرا کنید. نسخه نصبی، برنامه را به **Open with** فایل‌های ویدیو و صدا، به منوی کلیک راست پوشه‌ها (**تبدیل با مبدل ویدیو**) و به **Send to** اضافه می‌کند؛ نسخه بدون نصب این گزینه‌ها را ندارد.
 
 **مک:** فایل `dmg` مناسب را باز کنید (پردازنده‌های Apple Silicon: `macos-arm64` — پردازنده‌های اینتل: `macos-x64`) و برنامه را به پوشه Applications بکشید. در اولین اجرا به **System Settings → Privacy & Security** بروید و روی **Open Anyway** کلیک کنید.
 
@@ -213,13 +269,21 @@ cd VideoConverter-*-linux-x64
 
 <div dir="rtl">
 
+می‌توانید `./converter` را بدون اجرای `install.sh` مستقیماً از پوشه استخراج‌شده هم اجرا کنید؛ برنامه همان‌طور کار می‌کند (از جمله کشیدن و رها کردن، دکمه‌های انتخاب و خط فرمان)، ولی در منوی برنامه‌ها و **Open with** دیده نمی‌شود و فرمان `videoconverter` هم وجود ندارد.
+
 ### نحوه استفاده
 
-۱. **پوشه ورودی** را انتخاب کنید (همه زیرپوشه‌ها هم پردازش می‌شوند).<br>
+۱. **پوشه یا فایل ورودی** را انتخاب کنید: با **انتخاب پوشه** یک پوشه (همه زیرپوشه‌ها هم پردازش می‌شوند) و با **انتخاب فایل** یک یا چند فایل ویدیو و صدا. می‌توانید فایل‌ها و پوشه‌ها را روی پنجره هم بکشید و رها کنید.<br>
 ۲. **حالت اندازه** را انتخاب کنید: **دستی** با تعیین حداکثر اندازه، یا **خودکار** با انتخاب سطح فشرده‌سازی.<br>
 ۳. **محل ذخیره** را انتخاب کنید: جایگزین کردن فایل‌های اصلی، یا کپی در پوشه خروجی.<br>
 ۴. **بهینه** کمترین حجم را می‌دهد ولی کندتر است؛ **سریع** سریع‌تر است و حجم کمی بیشتر.<br>
 ۵. روی **شروع** کلیک کنید. با **لغو** عملیات فوراً متوقف و فایل نیمه‌کاره حذف می‌شود.
+
+فایل‌هایی که ویدیو یا صدا نیستند دست‌نخورده می‌مانند و کپی نمی‌شوند.
+
+در حالت کپی، اگر فقط یک پوشه انتخاب شده باشد محتوای آن مستقیماً در پوشه خروجی قرار می‌گیرد. با چند ورودی، هر پوشه در زیرپوشه‌ای هم‌نام با خودش در پوشه خروجی ذخیره می‌شود و فایل‌های تکی مستقیماً در خود پوشه خروجی. اگر دو خروجی هم‌نام شوند، دومی با نامی مثل `clip (2).mp4` ذخیره می‌شود تا روی هم نوشته نشوند.
+
+**باز کردن از بیرون برنامه:** در ویندوز (نسخه نصبی) روی فایل ویدیو یا صدا کلیک راست کنید و از **Open with** برنامه را انتخاب کنید، یا روی یک پوشه کلیک راست کنید و **تبدیل با مبدل ویدیو** را بزنید (در ویندوز ۱۱ زیر *Show more options*). برای ترکیبی از فایل‌ها و پوشه‌ها از **Send to** استفاده کنید. در مک از **Open With** در Finder و در لینوکس (پس از اجرای `install.sh`) از **Open With** مدیر فایل استفاده کنید. اگر برنامه از قبل باز باشد، فایل‌ها به همان پنجره فرستاده می‌شوند.
 
 فایل‌های لاگ در این مسیرها ذخیره می‌شوند: ویندوز `%LOCALAPPDATA%\VideoConverter\logs` — مک `~/Library/Application Support/VideoConverter/logs` — لینوکس `~/.local/share/VideoConverter/logs`
 

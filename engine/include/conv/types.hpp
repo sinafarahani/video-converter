@@ -18,7 +18,7 @@ namespace conv {
 // Where converted files go.
 enum class OutputMode {
     Replace,  // جاگزین کردن -- write next to the input and remove the original
-    CopyTo,   // کپی به آدرس  -- mirror the input tree under an output directory
+    CopyTo,   // کپی به آدرس  -- mirror the input tree(s) under an output directory
 };
 
 // What to do when the destination file already exists. Only meaningful in
@@ -50,8 +50,8 @@ enum class CompressionLevel {
 };
 
 struct Settings {
-    std::filesystem::path input_dir;
-    std::filesystem::path output_dir;
+    std::vector<std::filesystem::path> inputs;  // folders and/or files, in the order given
+    std::filesystem::path              output_dir;
 
     OutputMode         output_mode     = OutputMode::Replace;
     ExistingFilePolicy existing_policy = ExistingFilePolicy::Overwrite;

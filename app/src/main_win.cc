@@ -37,8 +37,15 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int) {
     const auto log_file = converter::user_data_dir() / L"logs" / L"cef.log";
     CefString(&settings.log_file) = log_file.wstring();
 
+    // If an instance is already running, CefInitialize hands our arguments to
+    // it and that process raises its window. Windows only lets it take the
+    // foreground if we -- launched by Explorer, so allowed to -- pass the right on.
+    ::AllowSetForegroundWindow(ASFW_ANY);
+
     if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
-        return CefGetExitCode();
+        // The hand-off to the running instance is a clean exit, not a failure.
+        const int code = CefGetExitCode();
+        return code == CEF_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED ? 0 : code;
     }
 
     CefRunMessageLoop();

@@ -1,4 +1,12 @@
 # install.sh replaces Exec with the absolute path of the installed binary.
+#
+# MimeType lists the shared-mime-info type of every extension the engine accepts
+# (engine/src/util.cpp; cmake/CheckMediaExtensions.cmake checks it), canonical
+# names first, then the older x- names that pre-2.2 databases still use.
+# gxf, lxf, oma and aa3 have no MIME type at all, and .pcm is not offered.
+# Deliberately NOT inode/directory: wherever no default folder handler is set,
+# the desktop would then open this app for every "Show in folder".
+# Exec keeps %F: %U could hand over http:// URLs, which ffmpeg would fetch.
 [Desktop Entry]
 Type=Application
 Version=1.5
@@ -15,4 +23,5 @@ Categories=AudioVideo;Video;AudioVideoEditing;
 Keywords=video;audio;convert;compress;ffmpeg;mp4;hevc;
 StartupNotify=true
 StartupWMClass=converter
-MimeType=video/mp4;video/x-matroska;video/x-msvideo;video/quicktime;video/x-flv;video/x-ms-wmv;video/webm;video/mp2t;audio/mpeg;audio/x-wav;audio/flac;audio/ogg;
+SingleMainWindow=true
+MimeType=video/mp4;video/vnd.avi;video/x-msvideo;video/x-matroska;video/quicktime;video/x-flv;video/x-ms-wmv;application/mxf;video/webm;video/3gpp;video/mp2t;video/ogg;video/x-theora+ogg;audio/mpeg;audio/aac;audio/vnd.wave;audio/x-wav;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/x-flac+ogg;audio/x-opus+ogg;audio/x-speex+ogg;audio/x-ms-wma;audio/AMR;audio/x-ape;audio/x-aiff;audio/basic;audio/x-musepack;audio/x-wavpack;audio/mp4;

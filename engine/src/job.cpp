@@ -1,13 +1,17 @@
 #include "conv/job.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
@@ -189,44 +193,419 @@ private:
     mutable std::mutex mutex_;
 };
 
+// ---------------------------------------------------------------------------
+// Input planning helpers
+// ---------------------------------------------------------------------------
+
+// Absolute, lexically normal, native separators, no trailing separator -- so
+// "D:\Day1\" typed by hand and "D:\Day1" from the picker compare and name
+// alike. Idempotent, and it never touches the disk beyond the current folder.
+fs::path normalize_input(const fs::path& p) {
+    if (p.empty()) return {};
+    std::error_code ec;
+    fs::path a = fs::absolute(p, ec);
+    if (ec) a = p;
+    a = a.lexically_normal();
+    a.make_preferred();
+    if (!a.has_filename() && a.has_relative_path()) a = a.parent_path();
+    return a;
+}
+
+// Resolves links, 8.3 short names, subst drives and on-disk casing, so two
+// spellings of one file yield one key. Used only for keys, never shown.
+fs::path canonical_or_self(const fs::path& p) {
+    std::error_code ec;
+    fs::path c = fs::weakly_canonical(p, ec);
+    return (ec || c.empty()) ? p : c;
+}
+
+// path_key with exactly one trailing separator, for "is under this folder"
+// prefix tests that must not match D:\Day10 when asking about D:\Day1.
+std::string dir_key(const fs::path& dir) {
+    std::string k = path_key(dir);
+    const char sep = static_cast<char>(fs::path::preferred_separator);
+    if (k.empty() || k.back() != sep) k.push_back(sep);
+    return k;
+}
+
+// The subfolder a folder input gets in the output when there are several
+// inputs. A drive or file-system root has no name of its own.
+std::string folder_label(const fs::path& folder) {
+    std::string name = path_to_utf8(folder.filename());
+    if (!name.empty()) return name;
+#ifdef _WIN32
+    for (const char c : path_to_utf8(folder.root_name())) {
+        if (std::isalnum(static_cast<unsigned char>(c))) name.push_back(c);  // "D:" -> "D"
+    }
+#endif
+    return name.empty() ? std::string("root") : name;
+}
+
+// `file`'s place under `base`, keeping its structure relative to `root`.
+// lexically_relative, unlike fs::relative, never touches the disk and so
+// cannot be led outside `base` by a junction; anything that does not sit
+// under `root` falls back to its bare file name.
+fs::path target_under(const fs::path& base, const fs::path& root, const fs::path& file) {
+    fs::path rel = file.lexically_relative(root);
+    if (rel.empty() || rel.is_absolute() || *rel.begin() == ".." || rel == ".") rel = file.filename();
+    return base / rel;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
 
-std::vector<fs::path> collect_files(const fs::path& dir) {
+std::vector<fs::path> collect_files(const fs::path& dir, std::vector<fs::path>* unreadable) {
     std::vector<fs::path> out;
-    std::error_code ec;
 
-    // recursive_directory_iterator with an error_code overload skips entries it
-    // cannot read (permission denied, broken junctions) instead of throwing.
-    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
-    if (ec) return out;
+    // An explicit stack of folders rather than recursive_directory_iterator:
+    // that one's increment() fails for good at the first folder it cannot
+    // open -- a broken junction, a path too long, no permission -- and every
+    // file after it in the walk was silently lost.
+    std::vector<fs::path> pending{dir};
+    while (!pending.empty()) {
+        const fs::path current = std::move(pending.back());
+        pending.pop_back();
 
-    for (; it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec) break;
-        std::error_code sec;
-        if (it->is_regular_file(sec)) out.push_back(it->path());
+        std::error_code ec;
+        fs::directory_iterator it(current, ec);
+        const fs::directory_iterator end;
+        for (; !ec && it != end; it.increment(ec)) {
+            std::error_code sec;
+            // Links to folders (symlinks, junctions) are not followed, as
+            // before: they can loop, or lead outside the folder picked.
+            if (it->symlink_status(sec).type() == fs::file_type::directory) {
+                pending.push_back(it->path());
+            } else if (it->is_regular_file(sec)) {
+                out.push_back(it->path());
+            }
+        }
+        // What the listing gave before failing is kept.
+        if (ec && unreadable) unreadable->push_back(current);
     }
+    std::sort(out.begin(), out.end());
     return out;
+}
+
+fs::path output_target(const Settings& s, const fs::path& root, const fs::path& file) {
+    if (s.output_mode == OutputMode::Replace) return file;
+    return target_under(s.output_dir, root, file);
 }
 
 fs::path build_output_path(const Settings& s,
                            const fs::path& input_root,
                            const fs::path& input_file) {
-    if (s.output_mode == OutputMode::Replace) return input_file;
-
-    std::error_code ec;
-    const fs::path relative = fs::relative(input_file, input_root, ec);
-    const fs::path target = ec ? (s.output_dir / input_file.filename())
-                               : (s.output_dir / relative);
-
-    if (target.has_parent_path()) {
+    const fs::path target = output_target(s, input_root, input_file);
+    if (s.output_mode == OutputMode::CopyTo && target.has_parent_path()) {
         std::error_code mec;
         fs::create_directories(target.parent_path(), mec);
     }
     return target;
+}
+
+InputPlan plan_inputs(const Settings& s) {
+    InputPlan plan;
+    const bool copy = s.output_mode == OutputMode::CopyTo;
+
+    // The output folder, canonical, for the "inside an input folder" test and
+    // for comparing planned outputs with planned inputs without a stat each.
+    const fs::path out        = copy ? normalize_input(s.output_dir) : fs::path{};
+    const fs::path canon_out  = copy ? canonical_or_self(out) : fs::path{};
+    const std::string out_dir = copy ? dir_key(canon_out) : std::string{};
+
+    // A file found inside a folder input, keyed once.
+    struct Child {
+        fs::path    path;
+        fs::path    canon;         // derived lexically from the folder's canonical path
+        std::string key;
+        bool        media = false; // audio/video by extension, and not an engine temp file
+        bool        video = false;
+    };
+    struct Folder {
+        fs::path           path;   // as given (normalised)
+        std::string        key;    // canonical
+        std::string        dir;    // dir_key of the canonical path
+        std::vector<Child> children;
+    };
+    struct Loose {
+        fs::path    path;
+        fs::path    canon;
+        std::string key;
+        bool        video = false;
+    };
+    // A usable input, in input order: a folder (index into `folders`) or a
+    // loose file.
+    struct Entry {
+        int   folder = -1;
+        Loose loose;
+    };
+    struct Item {
+        PlannedFile f;
+        fs::path    canon;       // canonical input, the base of its keys
+        int         folder = -1; // index into `folders`; -1 for a loose file
+    };
+    std::vector<Folder> folders;                        // distinct folder inputs, in input order
+    std::vector<Entry>  entries;
+    std::vector<Item>   items;
+    std::unordered_map<std::string, size_t> item_by_key;  // canonical input key -> index in items
+    std::unordered_map<std::string, bool>   top_level;    // distinct usable inputs -> is a folder
+    std::unordered_set<std::string>         seen_other;   // folder files already counted as ignored/excluded
+    std::unordered_set<std::string>         reported;     // missing / not-media paths already listed
+
+    // "is strictly inside" for two dir_key()s.
+    const auto strictly_inside = [](const std::string& inner, const std::string& outer) {
+        return inner != outer && inner.starts_with(outer);
+    };
+
+    // 1. What each input is. A folder is walked once, however often it is
+    //    given; a second mention only counts its files as duplicates below.
+    for (const fs::path& raw : s.inputs) {
+        if (raw.empty()) continue;
+        const fs::path p = normalize_input(raw);
+
+        std::error_code ec;
+        const fs::file_status st = fs::status(p, ec);
+        if (!fs::exists(st)) {
+            if (reported.insert(path_key(p)).second) plan.missing.push_back(p);
+            continue;
+        }
+        ++plan.found_inputs;
+
+        if (fs::is_directory(st)) {
+            const fs::path    canon = canonical_or_self(p);
+            const std::string key   = path_key(canon);
+            top_level.emplace(key, true);
+
+            int folder = -1;
+            for (size_t i = 0; i < folders.size(); ++i) {
+                if (folders[i].key == key) folder = static_cast<int>(i);
+            }
+            if (folder < 0) {
+                folder = static_cast<int>(folders.size());
+                Folder f{p, key, dir_key(canon), {}};
+                for (fs::path& child : collect_files(p, &plan.unreadable_folders)) {
+                    // Keyed off the folder's canonical path lexically: one
+                    // canonicalisation per input, not one per file.
+                    Child c;
+                    c.canon = canon / child.lexically_relative(p);
+                    c.key   = path_key(c.canon);
+                    const std::string ext = lower_extension(child);
+                    c.video = is_video_extension(ext);
+                    c.media = (c.video || is_audio_extension(ext)) && !is_temp_sibling(child);
+                    c.path  = std::move(child);
+                    f.children.push_back(std::move(c));
+                }
+                folders.push_back(std::move(f));
+            }
+            entries.push_back({folder, {}});
+            continue;
+        }
+
+        if (fs::is_regular_file(st)) {
+            const std::string ext   = lower_extension(p);
+            const bool        video = is_video_extension(ext);
+            // An engine temp file named directly is no more an input than one
+            // found in a folder.
+            if ((video || is_audio_extension(ext)) && !is_temp_sibling(p)) {
+                Loose l;
+                l.path  = p;
+                l.video = video;
+                // A link is keyed by where it sits, as the same link reached
+                // through a folder walk is; weakly_canonical would key it by its
+                // target, and put its output checks in the target's folder.
+                std::error_code lec;
+                l.canon = fs::is_symlink(fs::symlink_status(p, lec))
+                              ? canonical_or_self(p.parent_path()) / p.filename()
+                              : canonical_or_self(p);
+                l.key = path_key(l.canon);
+                top_level.emplace(l.key, false);
+                entries.push_back({-1, std::move(l)});
+                continue;
+            }
+        }
+        if (reported.insert(path_key(p)).second) plan.not_media.push_back(p);
+    }
+
+    // 2. Layout, CopyTo only. One folder on its own keeps the original layout
+    //    (its contents straight into the output). Otherwise every folder gets a
+    //    subfolder named after it -- "Day1 (2)" for a second folder of the same
+    //    name -- and loose files go straight into the output. Missing and
+    //    non-media inputs contribute nothing, so they do not change the layout.
+    //    A folder with no media of its own -- none at all, or only files an
+    //    earlier folder already has (a folder picked inside another) -- takes
+    //    no name, so it cannot push a real one to "Day1 (2)".
+    const bool single_folder = top_level.size() == 1 && top_level.begin()->second;
+    const bool subfolders    = copy && !single_folder;
+
+    std::vector<std::string>        labels(folders.size());  // empty: no subfolder
+    std::unordered_set<std::string> used_labels;
+    const auto assign_label = [&](size_t i) {
+        const std::string name  = folder_label(folders[i].path);
+        std::string       label = name;
+        for (int n = 2; !used_labels.insert(path_key(path_from_utf8(label))).second; ++n) {
+            label = fmt::format("{} ({})", name, n);
+        }
+        labels[i] = std::move(label);
+    };
+    if (subfolders) {
+        std::unordered_set<std::string> claimed;
+        for (size_t i = 0; i < folders.size(); ++i) {
+            const bool skip_out = strictly_inside(out_dir, folders[i].dir);
+            bool       owns     = false;
+            for (const Child& c : folders[i].children) {
+                if (!c.media || (skip_out && c.key.starts_with(out_dir))) continue;
+                if (claimed.insert(c.key).second) owns = true;
+            }
+            if (owns) assign_label(i);
+        }
+    }
+
+    // Where each folder's outputs go. With the output folder equal to an input
+    // folder (or above one), out/<name>/ lies inside that input, and a second
+    // run would read the first run's results from it and write them again one
+    // level deeper, run after run. Never read from these either.
+    std::vector<std::string> zones;
+    for (size_t i = 0; i < folders.size(); ++i) {
+        if (!labels[i].empty()) zones.push_back(dir_key(canon_out / path_from_utf8(labels[i])));
+    }
+
+    const auto add = [&](const fs::path& input, const fs::path& canon, std::string key, bool video,
+                         int folder) {
+        const auto [it, inserted] = item_by_key.try_emplace(std::move(key), items.size());
+        if (!inserted) {
+            ++plan.duplicates;
+            // A file picked on its own that also sits in a picked folder keeps
+            // its place in the order but takes the folder's layout.
+            Item& first = items[it->second];
+            if (first.folder < 0 && folder >= 0) {
+                first.folder  = folder;
+                first.f.input = input;
+                first.f.root  = folders[static_cast<size_t>(folder)].path;
+            }
+            return;
+        }
+        Item item;
+        item.f.input = input;
+        item.f.root  = folder >= 0 ? folders[static_cast<size_t>(folder)].path : input.parent_path();
+        item.f.video = video;
+        item.canon   = canon;
+        item.folder  = folder;
+        items.push_back(std::move(item));
+    };
+
+    // 3. The files, in input order, each once.
+    for (const Entry& e : entries) {
+        if (e.folder < 0) {
+            add(e.loose.path, e.loose.canon, e.loose.key, e.loose.video, -1);
+            continue;
+        }
+        const Folder& f = folders[static_cast<size_t>(e.folder)];
+
+        // Edge case: an output folder strictly inside this input folder must
+        // never be read from, or a second run would convert the first run's
+        // results -- nor may any per-folder subfolder of the output that lies
+        // inside it (`zones`). An output folder equal to this one is left to
+        // the collision rule below, which keeps outputs off inputs.
+        std::vector<const std::string*> skip;
+        if (copy) {
+            if (strictly_inside(out_dir, f.dir)) skip.push_back(&out_dir);
+            for (const std::string& z : zones) {
+                if (strictly_inside(z, f.dir)) skip.push_back(&z);
+            }
+        }
+
+        for (const Child& c : f.children) {
+            const bool excluded = std::any_of(skip.begin(), skip.end(), [&](const std::string* z) {
+                return c.key.starts_with(*z);
+            });
+            if (excluded) {
+                if (seen_other.insert(c.key).second) ++plan.excluded_output_subtree;
+                continue;
+            }
+            if (!c.media) {
+                if (seen_other.insert(c.key).second) ++plan.ignored_in_folders;
+                continue;
+            }
+            add(c.path, c.canon, c.key, c.video, e.folder);
+        }
+    }
+
+    // A folder whose files all looked like an earlier folder's -- until that
+    // folder's copies were skipped as output above -- has files after all,
+    // and still gets a name.
+    std::vector<fs::path> folder_base(folders.size(), out);
+    if (subfolders) {
+        for (const Item& item : items) {
+            if (item.folder >= 0 && labels[static_cast<size_t>(item.folder)].empty()) {
+                assign_label(static_cast<size_t>(item.folder));
+            }
+        }
+        for (size_t i = 0; i < folders.size(); ++i) {
+            if (!labels[i].empty()) folder_base[i] = out / path_from_utf8(labels[i]);
+        }
+    }
+
+    // 4. Output names, decided in plan order. A name is taken when an earlier
+    // file already got it, when it is an input of this run (an output never
+    // overwrites an input; covers the output folder being an input folder --
+    // and in Copy mode that includes the file's own input, since writing there
+    // would replace the original that the mode promises to keep), or -- in
+    // Replace mode -- when some unrelated file already sits there: converting
+    // clip.avi must not delete the user's own clip.mp4. In CopyTo mode such an
+    // unrelated file is left to existing_policy.
+    std::unordered_set<std::string>      taken_outputs;
+    std::unordered_map<std::string, int> wanted;  // output key before any rename -> files wanting it
+    std::vector<std::string>             wanted_key(items.size());
+    plan.files.reserve(items.size());
+    for (size_t i = 0; i < items.size(); ++i) {
+        Item& item = items[i];
+
+        fs::path target = !copy             ? item.f.input
+                          : item.folder >= 0 ? target_under(folder_base[static_cast<size_t>(item.folder)],
+                                                            item.f.root, item.f.input)
+                                             : out / item.f.input.filename();
+        target = with_extension(target, item.f.video ? ".mp4" : ".mp3");
+
+        // Keys for candidates are derived from an already canonical base, so
+        // they compare with the input keys without touching the disk.
+        const auto key_of = [&](const fs::path& candidate) {
+            return copy ? path_key(canon_out / candidate.lexically_relative(out))
+                        : path_key(item.canon.parent_path() / candidate.filename());
+        };
+        const auto taken = [&](const fs::path& candidate) {
+            const std::string key = key_of(candidate);
+            if (taken_outputs.count(key)) return true;
+            if (const auto in = item_by_key.find(key);
+                in != item_by_key.end() && (copy || in->second != i)) {
+                return true;
+            }
+            if (!copy) {
+                std::error_code ec;
+                if (fs::exists(candidate, ec) && !same_path(candidate, item.f.input)) return true;
+            }
+            return false;
+        };
+
+        wanted_key[i] = key_of(target);
+        ++wanted[wanted_key[i]];
+
+        const std::string stem = path_to_utf8(target.stem());
+        const std::string ext  = path_to_utf8(target.extension());
+        fs::path candidate = target;
+        for (int n = 2; taken(candidate); ++n) {
+            candidate = target.parent_path() / path_from_utf8(fmt::format("{} ({}){}", stem, n, ext));
+            item.f.renamed = true;
+        }
+        taken_outputs.insert(key_of(candidate));
+        item.f.output = std::move(candidate);
+        plan.files.push_back(std::move(item.f));
+    }
+    for (size_t i = 0; i < plan.files.size(); ++i) {
+        plan.files[i].name_clash = wanted[wanted_key[i]] > 1;
+    }
+    return plan;
 }
 
 BitrateBudget compute_budget(std::uint64_t target_bytes,
@@ -498,10 +877,65 @@ struct JobRunner::Impl {
     // already been rewritten to .mp4, decided they were "different files", and
     // so wrote clip.mp4 while leaving the original clip.avi sitting next to it.
     // Only inputs already named .mp4 were genuinely replaced.
-    bool finalize(const fs::path& input, const fs::path& output, const fs::path& temp) {
-        std::error_code ec;
+    // -- the disk's last word on output names ----------------------------------
+    //
+    // plan_inputs() decides names from path keys. Where the keys fold two names
+    // differently from the file system -- a non-ASCII letter's case on macOS,
+    // Unicode normalisation, a hard link -- two "different" names are one file,
+    // and replacing it would delete an input or a result of this very run.
+    // File identities catch that.
+    std::vector<fs::path>              run_inputs;  // this run's inputs, set by run()
+    std::optional<std::vector<FileId>> input_ids;   // their identities, read on first need
+    std::vector<FileId>                produced;    // every output this run has written
 
-        if (!same_path(input, output)) {
+    // True when `p` is a file this run wrote, or one of its inputs.
+    bool belongs_to_run(const fs::path& p) {
+        const auto id = file_id(p);
+        if (!id) return false;
+        if (std::find(produced.begin(), produced.end(), *id) != produced.end()) return true;
+        if (!input_ids) {
+            input_ids.emplace();
+            input_ids->reserve(run_inputs.size());
+            for (const auto& in : run_inputs) {
+                if (const auto iid = file_id(in)) input_ids->push_back(*iid);
+            }
+        }
+        return std::find(input_ids->begin(), input_ids->end(), *id) != input_ids->end();
+    }
+
+    // The first "<stem> (n)<ext>" next to `p` that nothing occupies.
+    static fs::path free_sibling(const fs::path& p) {
+        const std::string stem = path_to_utf8(p.stem());
+        const std::string ext  = path_to_utf8(p.extension());
+        fs::path candidate = p;
+        for (int n = 2; n < 100000; ++n) {
+            candidate = p.parent_path() / path_from_utf8(fmt::format("{} ({}){}", stem, n, ext));
+            std::error_code ec;
+            if (!fs::exists(candidate, ec) && !ec) break;
+        }
+        return candidate;
+    }
+
+    bool finalize(const fs::path& input, fs::path output, const fs::path& temp) {
+        std::error_code ec;
+        const bool replace_mode = settings.output_mode == OutputMode::Replace;
+        bool       in_place     = same_path(input, output);
+
+        // Behind the plan: in Copy mode the original is never the file that
+        // gets replaced; an output never replaces an input or an earlier
+        // result of this run; and in Replace mode it never replaces anything
+        // -- the plan saw that name free, so whatever sits there now is new.
+        // Such an output takes the next free " (n)" name instead.
+        const bool collides = in_place ? !replace_mode
+                                       : file_exists(output) && (replace_mode || belongs_to_run(output));
+        if (collides) {
+            output   = free_sibling(output);
+            in_place = false;
+            ui(msg::output_renamed(path_to_utf8(input), path_to_utf8(output)));
+            file_log(fmt::format("Output name taken on disk, saving as: {}", path_to_utf8(output)));
+        }
+
+        if (!in_place) {
             if (file_exists(output)) {
                 fs::remove(output, ec);
                 if (ec || file_exists(output)) {
@@ -549,6 +983,8 @@ struct JobRunner::Impl {
                 return false;
             }
         }
+
+        if (const auto id = file_id(output)) produced.push_back(*id);
 
         const auto shown = path_to_utf8(output);
         ui(msg::file_saved(shown));
@@ -927,19 +1363,61 @@ void JobRunner::Impl::run() {
     RunSummary summary;
     ui(msg::kStarting);
 
-    std::error_code ec;
-    if (!fs::is_directory(settings.input_dir, ec)) {
-        ui(msg::kInputDirMissing);
-        if (cb.finished) cb.finished(summary);
-        running = false;
-        return;
+    produced.clear();
+    input_ids.reset();
+    run_inputs.clear();
+
+    for (const auto& in : settings.inputs) file_log(fmt::format("Input: {}", path_to_utf8(in)));
+
+    // Existence checks and folder walks happen here, on the worker thread, and
+    // before the encoder is chosen: no benchmark when there is nothing to do.
+    const InputPlan plan = plan_inputs(settings);
+    run_inputs.reserve(plan.files.size());
+    for (const auto& f : plan.files) run_inputs.push_back(f.input);
+
+    // A folder the walk could not list would otherwise vanish from the run
+    // without a word.
+    if (!plan.unreadable_folders.empty()) {
+        ui(msg::folders_unreadable(static_cast<int>(plan.unreadable_folders.size())));
+        for (const auto& d : plan.unreadable_folders) {
+            file_log(fmt::format("Folder could not be read, its files are not processed: {}",
+                                 path_to_utf8(d)));
+        }
     }
 
-    const auto files = collect_files(settings.input_dir);
-    if (files.empty()) {
-        ui(msg::kNoFilesFound);
-        if (cb.finished) cb.finished(summary);
+    // Files that are neither audio nor video stay exactly where they are and
+    // are not copied into the output tree. Inside folders that is silent, as
+    // it always was; a file the user named directly gets a line saying so.
+    for (const auto& p : plan.missing) {
+        ui(msg::input_missing(path_to_utf8(p)));
+        file_log(fmt::format("Input not found: {}", path_to_utf8(p)));
+    }
+    for (const auto& p : plan.not_media) {
+        ui(msg::input_not_media(path_to_utf8(p)));
+        file_log(fmt::format("Not audio/video, left alone: {}", path_to_utf8(p)));
+    }
+    summary.missing           = static_cast<int>(plan.missing.size());
+    summary.skipped_not_media = static_cast<int>(plan.not_media.size());
+    if (plan.duplicates) {
+        file_log(fmt::format("{} file(s) reached more than once, processed once", plan.duplicates));
+    }
+    if (plan.ignored_in_folders) {
+        file_log(fmt::format("{} non-media file(s) in the input folders left alone",
+                             plan.ignored_in_folders));
+    }
+    if (plan.excluded_output_subtree) {
+        file_log(fmt::format("{} file(s) inside the output folder not read as input",
+                             plan.excluded_output_subtree));
+    }
+
+    if (plan.files.empty()) {
+        // Counted per input, not per distinct path: `missing` lists a path
+        // given twice only once.
+        const bool all_missing = !plan.missing.empty() && plan.found_inputs == 0;
+        ui(all_missing ? msg::kInputsMissing : msg::kNoMediaFound);
+        file_log(all_missing ? "No input exists." : "No audio or video files in the inputs.");
         running = false;
+        if (cb.finished) cb.finished(summary);
         return;
     }
 
@@ -950,8 +1428,9 @@ void JobRunner::Impl::run() {
     file_log(fmt::format("Encoder: {} ({}) -- {}", encoder.ffmpeg_encoder, encoder.device_name,
                          encoder.detail));
 
-    file_count = static_cast<int>(files.size());
-    file_log(fmt::format("{} file(s) in {}", file_count, path_to_utf8(settings.input_dir)));
+    // Media files only, so "i / N" counts what is actually converted.
+    file_count = static_cast<int>(plan.files.size());
+    file_log(fmt::format("{} media file(s) from {} input(s)", file_count, settings.inputs.size()));
 
     for (int i = 0; i < file_count; ++i) {
         if (cancelled()) {
@@ -960,33 +1439,42 @@ void JobRunner::Impl::run() {
         }
         file_index = i;
 
-        const fs::path& input = files[static_cast<size_t>(i)];
-        const std::string ext = lower_extension(input);
-        const bool video = is_video_extension(ext);
-        const bool audio = !video && is_audio_extension(ext);
+        const PlannedFile& f = plan.files[static_cast<size_t>(i)];
 
-        // Files that are neither stay exactly where they are, and are not
-        // copied into the output tree.
-        if (!video && !audio) {
-            begin_file(input, 0.0);
-            emit_progress(1.0);
-            continue;
-        }
-
-        fs::path output = build_output_path(settings, settings.input_dir, input);
-        const fs::path predicted = with_extension(output, video ? ".mp4" : ".mp3");
-
+        // A file this run wrote or reads is not "existing" in the policy's
+        // sense (names the plan's keys told apart that are one file on
+        // disk): finalize() gives such an output a free name instead.
         if (settings.output_mode == OutputMode::CopyTo &&
-            settings.existing_policy == ExistingFilePolicy::Skip && file_exists(predicted)) {
-            file_log(fmt::format("Skipped existing file: {}", path_to_utf8(predicted)));
+            settings.existing_policy == ExistingFilePolicy::Skip && file_exists(f.output) &&
+            !belongs_to_run(f.output)) {
+            if (f.name_clash) {
+                // Several inputs share this output name, and the order decides
+                // who gets which; the existing file may be another input's.
+                ui(msg::skipped_name_clash(path_to_utf8(f.input), path_to_utf8(f.output)));
+                file_log(fmt::format("Skipped, output exists and several inputs share its name: {} -> {}",
+                                     path_to_utf8(f.input), path_to_utf8(f.output)));
+            } else {
+                file_log(fmt::format("Skipped existing file: {}", path_to_utf8(f.output)));
+            }
             ++summary.skipped_exists;
-            begin_file(input, 0.0);
+            begin_file(f.input, 0.0);
             emit_progress(1.0);
             continue;
         }
 
-        const FileResult r = video ? convert_video(input, output)
-                                   : convert_audio(input, output);
+        // Created only now, so a cancelled run leaves no empty folders behind
+        // for the files it never reached.
+        if (settings.output_mode == OutputMode::CopyTo && f.output.has_parent_path()) {
+            std::error_code mec;
+            fs::create_directories(f.output.parent_path(), mec);
+        }
+        if (f.renamed) {
+            ui(msg::output_renamed(path_to_utf8(f.input), path_to_utf8(f.output)));
+            file_log(fmt::format("Output name taken, saving as: {}", path_to_utf8(f.output)));
+        }
+
+        const FileResult r = f.video ? convert_video(f.input, f.output)
+                                     : convert_audio(f.input, f.output);
         switch (r) {
             case FileResult::Converted:     ++summary.converted; break;
             case FileResult::Remuxed:       ++summary.remuxed; ++summary.skipped_small; break;
@@ -1007,9 +1495,10 @@ void JobRunner::Impl::run() {
         ui(msg::kFinished);
         file_log("All tasks completed.");
     }
-    file_log(fmt::format("Summary: {} converted, {} remuxed, {} skipped, {} failed",
-                         summary.converted, summary.remuxed,
-                         summary.skipped_exists, summary.failed));
+    file_log(fmt::format("Summary: {} converted, {} remuxed, {} skipped, {} failed, "
+                         "{} not media, {} missing",
+                         summary.converted, summary.remuxed, summary.skipped_exists,
+                         summary.failed, summary.skipped_not_media, summary.missing));
 
     running = false;
     if (cb.finished) cb.finished(summary);
@@ -1043,14 +1532,21 @@ bool JobRunner::start(Settings settings, JobCallbacks callbacks) {
     impl_->settings = std::move(settings);
     impl_->cb       = std::move(callbacks);
     // Paths arrive with whatever separators the caller used; normalising here
-    // keeps every later path -- and every log line -- consistent.
-    impl_->settings.input_dir  = impl_->settings.input_dir.lexically_normal().make_preferred();
+    // keeps every later path -- and every log line -- consistent. Inputs are
+    // also made absolute. Whether they exist is left to the worker thread:
+    // this runs on the UI thread, and walking a large folder here would freeze
+    // the window.
+    auto& inputs = impl_->settings.inputs;
+    inputs.erase(std::remove_if(inputs.begin(), inputs.end(),
+                                [](const fs::path& p) { return p.empty(); }),
+                 inputs.end());
+    for (auto& p : inputs) p = normalize_input(p);
     impl_->settings.output_dir = impl_->settings.output_dir.lexically_normal().make_preferred();
     impl_->cancel.store(false, std::memory_order_relaxed);
 
-    // Validation, in the same order and with the same messages as the original.
-    if (impl_->settings.input_dir.empty()) {
-        impl_->ui(msg::kInputDirEmpty);
+    // Validation, in the same order as the original.
+    if (inputs.empty()) {
+        impl_->ui(msg::kInputsEmpty);
         return false;
     }
     if (!impl_->tools.valid()) {

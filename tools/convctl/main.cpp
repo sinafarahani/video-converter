@@ -10,15 +10,25 @@
 //   convctl quote                             self-test of Windows argv quoting
 //   convctl size [values...]                  size parsing (built-in table if none)
 //   convctl probe <file>                      duration, streams, per-track loudness
-//   convctl run <input-dir> [--out <dir>] [--size 1GB | --level medium]
-//              [--fast] [--skip] [--cpu]
+//   convctl plan <paths...> [--out <dir>] [--replace]
+//                                             what a run would do with these
+//                                             inputs: every input -> output,
+//                                             renames, skipped inputs (no ffmpeg)
+//   convctl run <paths...> [--out <dir>] [--replace] [--size 1GB | --level medium]
+//              [--fast] [--skip] [--cpu] [--cancel-after <s>]
+//
+// <paths...> is any mix of folders and audio/video files; flags may come before,
+// between or after them. Without --out (or with --replace) files are replaced
+// in place, as the app's Replace mode does.
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <thread>
 #include <cstdio>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -115,11 +125,10 @@ int cmd_quote() {
 int cmd_size(const std::vector<std::string>& args) {
     std::vector<std::string> inputs(args.begin() + std::min<size_t>(2, args.size()), args.end());
 
-    // With no arguments, run a built-in table. This exists because Windows hands
-    // main() its argv in the active ANSI code page, so Persian text typed on a
-    // command line arrives as question marks and cannot be tested that way.
-    // These literals are UTF-8 in the source (the file is compiled /utf-8),
-    // which is exactly how strings arrive from the JavaScript bridge.
+    // With no arguments, run a built-in table, so the Persian cases are covered
+    // without depending on how a given shell passes non-ASCII arguments. These
+    // literals are UTF-8 in the source (the file is compiled /utf-8), which is
+    // exactly how strings arrive from the JavaScript bridge.
     if (inputs.empty()) {
         inputs = {
             "1GB", "500MB", "1", "500", "15.9", "16", "2.5gb", "  700 MB  ",
@@ -175,27 +184,45 @@ int cmd_probe(const conv::ToolPaths& tools, const std::string& file) {
     return 0;
 }
 
-int cmd_run(const conv::ToolPaths& tools, const std::vector<std::string>& args) {
-    conv::Settings s;
+// What `run` and `plan` were asked to do.
+struct RunArgs {
+    conv::Settings settings;
     int cancel_after = 0;  // seconds; 0 = never. Exercises JobRunner::cancel() like the UI does.
-    s.input_dir = conv::path_from_utf8(args[2]);
+};
+
+// Paths (files and folders) and flags in any order, from args[2] on. Flags
+// with a value take the next argument. Prints the reason and returns nothing
+// when the arguments are unusable, so a typo fails loudly instead of silently
+// running with defaults.
+std::optional<RunArgs> parse_run_args(const std::vector<std::string>& args) {
+    RunArgs r;
+    conv::Settings& s = r.settings;
     s.size_mode = conv::SizeMode::Automatic;
     s.level     = conv::CompressionLevel::Medium;
+    bool replace = false;
 
-    for (size_t i = 3; i < args.size(); ++i) {
+    for (size_t i = 2; i < args.size(); ++i) {
         const std::string& a = args[i];
-        if (a == "--out" && i + 1 < args.size()) {
+        const bool takes_value = a == "--out" || a == "--size" || a == "--level" || a == "--cancel-after";
+        if (takes_value && i + 1 >= args.size()) {
+            fmt::print("{} needs a value\n", a);
+            return std::nullopt;
+        }
+
+        if (a == "--out") {
             s.output_mode = conv::OutputMode::CopyTo;
             s.output_dir  = conv::path_from_utf8(args[++i]);
-        } else if (a == "--size" && i + 1 < args.size()) {
+        } else if (a == "--replace") {
+            replace = true;
+        } else if (a == "--size") {
             const auto v = conv::parse_size_input(args[++i]);
             if (!v) {
                 fmt::print("bad size\n");
-                return 2;
+                return std::nullopt;
             }
             s.size_mode      = conv::SizeMode::Manual;
             s.max_size_bytes = *v;
-        } else if (a == "--level" && i + 1 < args.size()) {
+        } else if (a == "--level") {
             const std::string l = args[++i];
             s.size_mode = conv::SizeMode::Automatic;
             s.level = l == "low"     ? conv::CompressionLevel::Low
@@ -208,10 +235,55 @@ int cmd_run(const conv::ToolPaths& tools, const std::vector<std::string>& args) 
             s.existing_policy = conv::ExistingFilePolicy::Skip;
         } else if (a == "--cpu") {
             s.force_software_encoder = true;
-        } else if (a == "--cancel-after" && i + 1 < args.size()) {
-            cancel_after = std::stoi(args[++i]);
+        } else if (a == "--cancel-after") {
+            const std::string& v = args[++i];
+            const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), r.cancel_after);
+            if (ec != std::errc() || end != v.data() + v.size() || r.cancel_after < 0) {
+                fmt::print("bad --cancel-after value: {}\n", v);
+                return std::nullopt;
+            }
+        } else if (a.starts_with("--")) {
+            fmt::print("unknown option: {}\n", a);
+            return std::nullopt;
+        } else {
+            s.inputs.push_back(conv::path_from_utf8(a));
         }
     }
+
+    // --replace wins over --out, whichever order they came in.
+    if (replace) s.output_mode = conv::OutputMode::Replace;
+    if (s.inputs.empty()) {
+        fmt::print("no inputs: give one or more files and/or folders\n");
+        return std::nullopt;
+    }
+    return r;
+}
+
+// Prints what a run would do, without ffmpeg and without writing anything.
+// CI greps this output, so the line shapes are part of the contract.
+int cmd_plan(const RunArgs& r) {
+    const conv::InputPlan plan = conv::plan_inputs(r.settings);
+
+    fmt::print("plan: {} media file(s)\n", plan.files.size());
+    for (const auto& f : plan.files) {
+        fmt::print("  {} -> {}{}\n", conv::path_to_utf8(f.input), conv::path_to_utf8(f.output),
+                   f.renamed ? " [renamed]" : "");
+    }
+    fmt::print("missing: {}\n", plan.missing.size());
+    for (const auto& p : plan.missing) fmt::print("  {}\n", conv::path_to_utf8(p));
+    fmt::print("not media: {}\n", plan.not_media.size());
+    for (const auto& p : plan.not_media) fmt::print("  {}\n", conv::path_to_utf8(p));
+    fmt::print("duplicates: {}\n", plan.duplicates);
+    fmt::print("ignored in folders: {}\n", plan.ignored_in_folders);
+    fmt::print("excluded (inside output folder): {}\n", plan.excluded_output_subtree);
+    fmt::print("unreadable folders: {}\n", plan.unreadable_folders.size());
+    for (const auto& p : plan.unreadable_folders) fmt::print("  {}\n", conv::path_to_utf8(p));
+    return 0;
+}
+
+int cmd_run(const conv::ToolPaths& tools, const RunArgs& r) {
+    const conv::Settings& s = r.settings;
+    const int cancel_after  = r.cancel_after;
 
     conv::RunLog log(exe_dir() / "logs");
     conv::JobRunner runner(tools, log, exe_dir() / "cache");
@@ -229,6 +301,11 @@ int cmd_run(const conv::ToolPaths& tools, const std::vector<std::string>& args) 
     cb.finished = [&](const conv::RunSummary& sum) {
         fmt::print("\n\ndone: {} converted, {} remuxed, {} skipped, {} failed, cancelled={}\n",
                    sum.converted, sum.remuxed, sum.skipped_exists, sum.failed, sum.cancelled);
+        // A separate line, so the "done:" line CI greps keeps its exact shape.
+        if (sum.skipped_not_media || sum.missing) {
+            fmt::print("inputs left alone: {} not media, {} missing\n", sum.skipped_not_media,
+                       sum.missing);
+        }
     };
 
     if (!runner.start(s, cb)) {
@@ -250,12 +327,10 @@ int cmd_run(const conv::ToolPaths& tools, const std::vector<std::string>& args) 
     return 0;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    std::vector<std::string> args(argv, argv + argc);
+// `args` are UTF-8 on every platform.
+int run_main(const std::vector<std::string>& args) {
     if (args.size() < 2) {
-        fmt::print("usage: convctl <gpu|bench|quote|size|probe|run> ...\n");
+        fmt::print("usage: convctl <gpu|bench|quote|size|probe|plan|run> ...\n");
         return 2;
     }
 
@@ -265,6 +340,15 @@ int main(int argc, char** argv) {
     if (cmd == "size")  return cmd_size(args);
     if (cmd == "quote") return cmd_quote();
 
+    // `plan` needs no ffmpeg; `run` reports bad arguments before a missing
+    // ffmpeg, since that is the more useful thing to hear first.
+    std::optional<RunArgs> run_args;
+    if (cmd == "plan" || cmd == "run") {
+        run_args = parse_run_args(args);
+        if (!run_args) return 2;
+        if (cmd == "plan") return cmd_plan(*run_args);
+    }
+
     if (!tools.valid()) {
         fmt::print("ffmpeg/ffprobe not found next to convctl or on PATH\n");
         return 1;
@@ -273,8 +357,27 @@ int main(int argc, char** argv) {
     if (cmd == "gpu") return cmd_gpu(tools);
     if (cmd == "bench" && args.size() >= 3) return cmd_bench(tools, args);
     if (cmd == "probe" && args.size() >= 3) return cmd_probe(tools, args[2]);
-    if (cmd == "run" && args.size() >= 3) return cmd_run(tools, args);
+    if (cmd == "run") return cmd_run(tools, *run_args);
 
     fmt::print("unknown command\n");
     return 2;
 }
+
+}  // namespace
+
+#ifdef _MSC_VER
+// Windows hands main() its argv in the active ANSI code page, which turns a
+// Persian path into question marks. wmain gets UTF-16, re-encoded here through
+// the engine's own conversion into the UTF-8 the rest of the harness -- like
+// the UI bridge -- works in. (MinGW would need -municode for wmain.)
+int wmain(int argc, wchar_t** argv) {
+    std::vector<std::string> args;
+    args.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i) args.push_back(conv::path_to_utf8(std::filesystem::path(argv[i])));
+    return run_main(args);
+}
+#else
+int main(int argc, char** argv) {
+    return run_main(std::vector<std::string>(argv, argv + argc));
+}
+#endif

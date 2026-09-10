@@ -65,6 +65,36 @@ std::string audio_stereo_pair(int left, int right) {
                        left + 1, right + 1);
 }
 
+// --- inputs -----------------------------------------------------------------------
+
+std::string input_missing(std::string_view path) {
+    return fmt::format("فایل یا پوشه ورودی پیدا نشد: {}", path);
+}
+
+std::string input_not_media(std::string_view path) {
+    return fmt::format("فایل {} ویدیو یا صدا نیست و بدون تغییر رها شد.", path);
+}
+
+std::string output_renamed(std::string_view input, std::string_view output) {
+    return fmt::format("فایلی با همین نام وجود داشت؛ {} با نام {} ذخیره می‌شود.", input, output);
+}
+
+// ui/src/logText.ts matches this wording to pick out the two paths; change
+// both together.
+std::string skipped_name_clash(std::string_view input, std::string_view output) {
+    return fmt::format(
+        "فایل {} رد شد، چون خروجی {} از قبل وجود دارد؛ این نام خروجی به چند ورودی تعلق دارد و "
+        "ممکن است آن فایل از ورودی دیگری ساخته شده باشد.",
+        input, output);
+}
+
+std::string folders_unreadable(int count) {
+    return fmt::format(
+        "{} پوشه در ورودی‌ها خوانده نشد و فایل‌های داخل آن پردازش نمی‌شود؛ "
+        "نام پوشه‌ها در فایل لاگ ثبت شد.",
+        count);
+}
+
 // --- why the CPU is doing the work --------------------------------------------
 
 std::string sw_no_gpu() {

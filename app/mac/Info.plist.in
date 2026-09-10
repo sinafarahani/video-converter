@@ -44,5 +44,384 @@
 	<!-- Chromium requires this on modern macOS. -->
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<!-- "Open With" for audio and video files, and for folders.
+
+	     Viewer at rank Alternate: listed in Finder's Open With menu, but never
+	     chosen over an app that claims the type as its Owner or Default.
+	     public.movie and public.audio cover every type macOS itself declares
+	     (mp4, mov, avi, 3gp, mp3, m4a, wav, aiff, au), and also another app's
+	     own UTI for, say, .mkv, since that conforms to the same parents. The
+	     com.sina0.videoconverter types imported below cover the rest. The
+	     parents also match a few types the engine does not convert (.mpg,
+	     .m4v, .mid); the app leaves those alone and says so.
+
+	     Folders get rank None: one dropped on the Dock icon is accepted, but
+	     Finder never opens a folder with this app. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Audio or video file</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.audio</string>
+				<string>com.sina0.videoconverter.mkv</string>
+				<string>com.sina0.videoconverter.flv</string>
+				<string>com.sina0.videoconverter.wmv</string>
+				<string>com.sina0.videoconverter.mxf</string>
+				<string>com.sina0.videoconverter.gxf</string>
+				<string>com.sina0.videoconverter.lxf</string>
+				<string>com.sina0.videoconverter.webm</string>
+				<string>com.sina0.videoconverter.ts</string>
+				<string>com.sina0.videoconverter.m2ts</string>
+				<string>com.sina0.videoconverter.ogv</string>
+				<string>com.sina0.videoconverter.aac</string>
+				<string>com.sina0.videoconverter.flac</string>
+				<string>com.sina0.videoconverter.ogg</string>
+				<string>com.sina0.videoconverter.opus</string>
+				<string>com.sina0.videoconverter.wma</string>
+				<string>com.sina0.videoconverter.amr</string>
+				<string>com.sina0.videoconverter.ape</string>
+				<string>com.sina0.videoconverter.mpc</string>
+				<string>com.sina0.videoconverter.oma</string>
+				<string>com.sina0.videoconverter.aa3</string>
+				<string>com.sina0.videoconverter.wv</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>None</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Extensions the engine accepts that macOS declares no type for
+	     (cmake/CheckMediaExtensions.cmake checks this list against
+	     engine/src/util.cpp). Imported, not exported: where macOS or another
+	     app declares the same extension, that declaration wins, and it
+	     conforms to public.movie or public.audio anyway. .pcm is left out
+	     (raw PCM cannot be probed), and gxf, lxf, oma and aa3 have no MIME
+	     type to tag. -->
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.mkv</string>
+			<key>UTTypeDescription</key>
+			<string>Matroska video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>mkv</string></array>
+				<key>public.mime-type</key>
+				<array><string>video/x-matroska</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.flv</string>
+			<key>UTTypeDescription</key>
+			<string>Flash video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>flv</string></array>
+				<key>public.mime-type</key>
+				<array><string>video/x-flv</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.wmv</string>
+			<key>UTTypeDescription</key>
+			<string>Windows Media video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>wmv</string></array>
+				<key>public.mime-type</key>
+				<array><string>video/x-ms-wmv</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.mxf</string>
+			<key>UTTypeDescription</key>
+			<string>MXF video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>mxf</string></array>
+				<key>public.mime-type</key>
+				<array><string>application/mxf</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.gxf</string>
+			<key>UTTypeDescription</key>
+			<string>GXF video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>gxf</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.lxf</string>
+			<key>UTTypeDescription</key>
+			<string>LXF video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>lxf</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.webm</string>
+			<key>UTTypeDescription</key>
+			<string>WebM video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>webm</string></array>
+				<key>public.mime-type</key>
+				<array><string>video/webm</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.ts</string>
+			<key>UTTypeDescription</key>
+			<string>MPEG transport stream</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>ts</string></array>
+				<key>public.mime-type</key>
+				<array><string>video/mp2t</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.m2ts</string>
+			<key>UTTypeDescription</key>
+			<string>M2TS video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>m2ts</string></array>
+				<key>public.mime-type</key>
+				<array><string>video/mp2t</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.ogv</string>
+			<key>UTTypeDescription</key>
+			<string>Ogg video</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.movie</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>ogv</string></array>
+				<key>public.mime-type</key>
+				<array><string>video/ogg</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.aac</string>
+			<key>UTTypeDescription</key>
+			<string>AAC audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>aac</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/aac</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.flac</string>
+			<key>UTTypeDescription</key>
+			<string>FLAC audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>flac</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/flac</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.ogg</string>
+			<key>UTTypeDescription</key>
+			<string>Ogg audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>ogg</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/ogg</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.opus</string>
+			<key>UTTypeDescription</key>
+			<string>Opus audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>opus</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/ogg</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.wma</string>
+			<key>UTTypeDescription</key>
+			<string>Windows Media audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>wma</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/x-ms-wma</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.amr</string>
+			<key>UTTypeDescription</key>
+			<string>AMR audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>amr</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/AMR</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.ape</string>
+			<key>UTTypeDescription</key>
+			<string>Monkey's Audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>ape</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/x-ape</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.mpc</string>
+			<key>UTTypeDescription</key>
+			<string>Musepack audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>mpc</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/x-musepack</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.oma</string>
+			<key>UTTypeDescription</key>
+			<string>ATRAC audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>oma</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.aa3</string>
+			<key>UTTypeDescription</key>
+			<string>ATRAC audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>aa3</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.sina0.videoconverter.wv</string>
+			<key>UTTypeDescription</key>
+			<string>WavPack audio</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.audio</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>wv</string></array>
+				<key>public.mime-type</key>
+				<array><string>audio/x-wavpack</string></array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

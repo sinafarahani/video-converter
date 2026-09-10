@@ -18,7 +18,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(converter
-  VERSION 2.0.1
+  VERSION 2.1.0
   DESCRIPTION "Video and Audio Compressor and Converter"
   # C as well as C++: on Linux, CEF's cmake runs CHECK_C_COMPILER_FLAG, which
   # fails outright if the C language was never enabled.
@@ -67,6 +67,11 @@ set(USE_SANDBOX OFF CACHE BOOL "Enable the CEF sandbox (changes the output to bo
 # Locate CEF
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+# The Windows installer, the macOS Info.plist and the Linux .desktop file each
+# carry a hand-written copy of the engine's extension list. Fail here, on every
+# platform and in the engine-only build too, if one has drifted from it.
+include(CheckMediaExtensions)
 
 if(CONVERTER_ENGINE_ONLY)
   set(CMAKE_CXX_STANDARD 20)

@@ -17,6 +17,8 @@ add_subdirectory("${CEF_LIBCEF_DLL_WRAPPER_PATH}" libcef_dll_wrapper)
 # The entry point and the two directory lookups are the only platform-specific
 # code. Folder picking goes through CefBrowserHost::RunFileDialog, which is
 # native everywhere, so there is no per-platform dialog code at all.
+# launch_paths turns command-line arguments (and macOS Apple Events, via
+# main_mac.mm) into input paths for the page.
 set(CONVERTER_SOURCES
   src/app.cc
   src/app.h
@@ -24,6 +26,8 @@ set(CONVERTER_SOURCES
   src/client.h
   src/bridge.cc
   src/bridge.h
+  src/launch_paths.cc
+  src/launch_paths.h
   src/platform.h
 )
 
@@ -103,9 +107,12 @@ if(OS_MAC)
                           "${_helper_output}" "${_helper_output}"
                           "${CONVERTER_BUNDLE_ID}.helper${_plist_suffix}")
 
+    # app.cc is shared with the main app, and it calls into launch_paths, so
+    # the helpers link that too even though they never open a path.
     add_executable(${_helper_target} MACOSX_BUNDLE
       src/main_mac_helper.cc src/app.cc src/app.h src/client.cc src/client.h
-      src/bridge.cc src/bridge.h src/platform_posix.cc src/platform.h)
+      src/bridge.cc src/bridge.h src/launch_paths.cc src/launch_paths.h
+      src/platform_posix.cc src/platform.h)
     SET_EXECUTABLE_TARGET_PROPERTIES(${_helper_target})
     target_include_directories(${_helper_target} PRIVATE "${CEF_ROOT}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(${_helper_target} PRIVATE conv_engine libcef_dll_wrapper ${CEF_STANDARD_LIBS})

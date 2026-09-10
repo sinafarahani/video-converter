@@ -1,7 +1,7 @@
 # Builds Video Converter for Windows, Linux and macOS (Apple Silicon and Intel),
 # and publishes a GitHub release when a v* tag is pushed.
 #
-#   git tag v2.0.1 && git push origin v2.0.1
+#   git tag v2.1.0 && git push origin v2.1.0
 #
 # Run it by hand from the Actions tab (workflow_dispatch) to build all four
 # packages as downloadable artifacts without publishing anything.
@@ -125,7 +125,8 @@ jobs:
 
       # The engine on its own, driven by the convctl harness: proves the
       # process layer, the bundled ffmpeg and the audio pairing actually work on
-      # this OS, not merely that the code compiles.
+      # this OS, not merely that the code compiles -- and that several inputs
+      # are planned, named and laid out as documented.
       - name: Engine tests
         run: |
           cmake -S . -B build/tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCONVERTER_ENGINE_ONLY=ON \
@@ -149,6 +150,148 @@ jobs:
           grep -q "output audio streams: 1" probe.txt
           ./convctl run t/in --out t/out --size 1MB --fast --cpu | tr '\r' '\n' | grep "done:" | tee run.txt
           grep -q "1 converted" run.txt
+
+          # expect <file> <ERE>: fail, naming the pattern, when no line matches.
+          expect() { grep -Eq -- "$2" "$1" || { echo "::error::no line in $1 matches: $2"; exit 1; }; }
+
+          # Several inputs at once: two folders with the same name, two files
+          # that map to one output name, a loose file, a non-media file, a
+          # missing path and a file given twice. `plan` needs no ffmpeg, and its
+          # line shapes are fixed (cmd_plan in tools/convctl/main.cpp). Paths
+          # are matched with [/\\] because Windows prints backslashes, and \r is
+          # dropped because it ends every Windows line.
+          mkdir -p t/m/day1/cam/sub t/m/day2/cam t/m/loose
+          for ext in mkv mov; do
+            ./ffmpeg -nostdin -y -v error \
+              -f lavfi -i "testsrc2=size=160x120:rate=25" \
+              -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+              -t 1 -c:v libx264 -preset ultrafast -c:a aac -shortest "t/m/day1/cam/a.$ext"
+          done
+          ./ffmpeg -nostdin -y -v error -f lavfi -i "sine=frequency=330:sample_rate=48000" \
+            -t 1 t/m/day1/cam/sub/b.wav
+          cp t/m/day1/cam/a.mkv t/m/day2/cam/a.mkv
+          cp t/m/day1/cam/a.mkv t/m/loose/c.mkv
+          echo notes  > t/m/day1/cam/notes.txt
+          echo readme > t/m/loose/readme.txt
+          inputs=(t/m/day1/cam t/m/day2/cam t/m/loose/c.mkv t/m/loose/readme.txt
+                  t/m/nothere.mkv t/m/day1/cam/a.mkv)
+
+          ./convctl plan "${inputs[@]}" --out t/mout | tr -d '\r' | tee plan.txt
+          expect plan.txt '^plan: 5 media file\(s\)$'
+          expect plan.txt 'cam[/\\]a\.mov -> .*[/\\]mout[/\\]cam[/\\]a \(2\)\.mp4 \[renamed\]$'
+          expect plan.txt 'cam[/\\]sub[/\\]b\.wav -> .*[/\\]mout[/\\]cam[/\\]sub[/\\]b\.mp3$'
+          expect plan.txt 'day2[/\\]cam[/\\]a\.mkv -> .*[/\\]mout[/\\]cam \(2\)[/\\]a\.mp4( \[renamed\])?$'
+          expect plan.txt 'loose[/\\]c\.mkv -> .*[/\\]mout[/\\]c\.mp4$'
+          grep -A1 -x 'missing: 1'   plan.txt | tail -1 | grep -Eq '[/\\]nothere\.mkv$'
+          grep -A1 -x 'not media: 1' plan.txt | tail -1 | grep -Eq '[/\\]readme\.txt$'
+          expect plan.txt '^duplicates: 1$'
+          expect plan.txt '^ignored in folders: 1$'
+          expect plan.txt '^excluded \(inside output folder\): 0$'
+
+          # The same inputs for real: every planned output appears, nothing
+          # else does, and the non-media files are neither copied nor touched.
+          ./convctl run "${inputs[@]}" --out t/mout --level high --fast --cpu \
+            | tr '\r' '\n' | grep "done:" | tee run-multi.txt
+          grep -q "5 converted, 0 remuxed, 0 skipped, 0 failed" run-multi.txt
+          while IFS= read -r out; do
+            [ -f "$out" ] || { echo "::error::planned output missing: $out"; exit 1; }
+          done < <(sed -n 's/^  .* -> \(.*\)$/\1/p' plan.txt | sed 's/ \[renamed\]$//')
+          [ "$(find t/mout -type f | wc -l | tr -d ' ')" = 5 ]
+          # One test per file: bash -e ignores a failure anywhere in an && list
+          # but its last command.
+          for f in t/m/loose/readme.txt t/m/day1/cam/notes.txt t/m/day1/cam/a.mov; do
+            [ -f "$f" ] || { echo "::error::input $f was removed"; exit 1; }
+          done
+
+          # An output folder inside the input folder is never read from.
+          mkdir -p t/x/in/out
+          cp t/m/loose/c.mkv t/x/in/c.mkv
+          cp t/m/loose/c.mkv t/x/in/out/c.mp4
+          ./convctl plan t/x/in --out t/x/in/out | tr -d '\r' | tee plan-inside.txt
+          expect plan-inside.txt '^plan: 1 media file\(s\)$'
+          expect plan-inside.txt '^excluded \(inside output folder\): 1$'
+
+          # Replace mode never deletes an unrelated file that has the output's
+          # name, while a file replaced in place keeps its own name.
+          mkdir -p t/r
+          cp t/m/loose/c.mkv t/r/clip.avi
+          cp t/m/loose/c.mkv t/r/clip.mp4
+          cp t/m/loose/c.mkv t/r/own.mp4
+          ./convctl plan t/r/clip.avi t/r/own.mp4 --replace | tr -d '\r' | tee plan-replace.txt
+          expect plan-replace.txt 'clip\.avi -> .*[/\\]clip \(2\)\.mp4 \[renamed\]$'
+          expect plan-replace.txt 'own\.mp4 -> .*[/\\]own\.mp4$'
+
+      # The app must make no network contact of its own ("Offline" in
+      # docs/DEVELOPMENT.md). The staged app runs for 30 s on a virtual display,
+      # with a fresh profile and every one of its processes under strace; a
+      # single IPv4 or IPv6 connect(), or a datagram sent to an IPv4 or IPv6
+      # address, fails the build. The sends matter because mDNS and SSDP
+      # (Cast/DIAL discovery) go out with sendto() on an unconnected socket and
+      # never call connect(). AF_UNIX (X11, D-Bus, IPC) and AF_NETLINK are local
+      # and expected. Discovery starts on demand, so this idle run is a floor;
+      # the MediaRouter entries in app.cc remain the real guard against it.
+      - name: Offline check
+        if: runner.os == 'Linux'
+        run: |
+          # xvfb and strace for the test. The rest are the app's own runtime
+          # libraries (the list in the README), normally on the image already.
+          sudo apt-get install -y -qq xvfb strace libnss3 libatk-bridge2.0-0 libcups2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2
+          stage="$(realpath "build/${{ matrix.preset }}/app/Release")"
+          trace="$RUNNER_TEMP/offline.strace"
+          # user_data_dir() follows XDG_DATA_HOME: a fresh profile, because state
+          # left by an earlier launch could hide a first-launch contact.
+          export XDG_DATA_HOME="$RUNNER_TEMP/offline-profile"
+          mkdir -p "$XDG_DATA_HOME"
+
+          # timeout puts itself and everything under it (xvfb-run, Xvfb, strace,
+          # every Chromium process) in one process group and signals the whole
+          # group, escalating to SIGKILL 10 s later. Its status is 124 (137 after
+          # SIGKILL) when the app was still running at the end, which is the
+          # point: an app that exited or crashed early leaves a clean trace that
+          # proves nothing.
+          status=0
+          (cd "$stage" && timeout -k 10 30 xvfb-run -a -s "-screen 0 1280x800x24" \
+            strace -f -qq -e trace=connect,sendto,sendmsg,sendmmsg -o "$trace" ./converter) \
+            > "$RUNNER_TEMP/offline.log" 2>&1 || status=$?
+          # Anything still running the staged binary, whatever its process group.
+          for p in /proc/[0-9]*; do
+            if [ "$(readlink "$p/exe" 2>/dev/null)" = "$stage/converter" ]; then
+              kill -KILL "${p#/proc/}" 2>/dev/null || true
+            fi
+          done
+
+          if [ "$status" -ne 124 ] && [ "$status" -ne 137 ]; then
+            tail -n 40 "$RUNNER_TEMP/offline.log" || true
+            tail -n 40 "$XDG_DATA_HOME/VideoConverter/logs/cef.log" 2>/dev/null || true
+            echo "::error::the app stopped before the 30 s were up (status $status)"
+            exit 1
+          fi
+          # The X11 connection alone guarantees some; none means strace saw nothing.
+          calls=$(grep -c 'connect(' "$trace" 2>/dev/null || true)
+          echo "connect() calls traced: ${calls:-0}"
+          [ "${calls:-0}" -gt 0 ] || { echo "::error::strace recorded no connect() at all"; exit 1; }
+          # Only a destination or peer address: strace prints those as
+          # {sa_family=AF_INET...} (msg_name= for sendmsg/sendmmsg). A bare
+          # AF_INET would also match netlink requests it decodes (ifa_family=).
+          if grep -E 'sa_family=AF_INET6?\b' "$trace"; then
+            echo "::error::the app made network contact (listed above)"
+            exit 1
+          fi
+
+      # Info.plist is written by string replacement (converter_write_plist in
+      # app/CMakeLists.txt), so nothing in the build ever parses it. Finder's
+      # "Open With" depends on the two keys checked below.
+      - name: Check Info.plist
+        if: runner.os == 'macOS'
+        run: |
+          app="build/${{ matrix.preset }}/app/Release/converter.app"
+          plist="$app/Contents/Info.plist"
+          plutil -lint "$plist" "$app"/Contents/Frameworks/*Helper*.app/Contents/Info.plist
+          for key in CFBundleDocumentTypes UTImportedTypeDeclarations; do
+            plutil -extract "$key" xml1 -o - "$plist" > /dev/null \
+              || { echo "::error::$key is missing from $plist"; exit 1; }
+          done
 
       - name: Package
         run: |

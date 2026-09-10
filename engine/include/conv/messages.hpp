@@ -15,11 +15,11 @@
 namespace conv::msg {
 
 // -- validation ------------------------------------------------------------
-inline constexpr std::string_view kInputDirEmpty   = "فیلد پوشه ورودی نمیتواند خالی باشد";
-inline constexpr std::string_view kInputDirMissing = "پوشه ورودی پیدا نشد.";
+// The Java version's three single-folder messages (empty field, folder not
+// found, no files in it) are replaced by kInputsEmpty, kInputsMissing and
+// kNoMediaFound below, now that the input can be several folders and files.
 inline constexpr std::string_view kInvalidSize     = "حداکثر اندازه خروجی نامعتبر است.";
 inline constexpr std::string_view kOutputDirEmpty  = "فیلد پوشه خروجی نمیتواند خالی باشد";
-inline constexpr std::string_view kNoFilesFound    = "هیچ فایلی در پوشه ورودی پیدا نشد.";
 
 // -- lifecycle -------------------------------------------------------------
 inline constexpr std::string_view kStarting  = "در حال شروع عملیات لطفا صبر کنید...";
@@ -46,6 +46,18 @@ std::string ffmpeg_missing();
 std::string using_encoder(std::string_view device, std::string_view encoder, double speedup);
 std::string audio_selected(int kept, int total);
 std::string audio_stereo_pair(int left, int right);
+
+// Inputs: any mix of folders and files.
+inline constexpr std::string_view kInputsEmpty   = "هیچ فایل یا پوشه‌ای برای ورودی انتخاب نشده است.";
+inline constexpr std::string_view kInputsMissing = "هیچ‌کدام از ورودی‌های انتخاب‌شده پیدا نشد.";
+inline constexpr std::string_view kNoMediaFound  = "هیچ فایل ویدیو یا صدایی در ورودی‌ها پیدا نشد.";
+std::string input_missing(std::string_view path);                          // one input does not exist
+std::string input_not_media(std::string_view path);                        // a file given directly is not audio/video
+std::string output_renamed(std::string_view input, std::string_view output);  // name taken, " (2)" added
+// Skip policy on a file whose output name other inputs of the run share.
+std::string skipped_name_clash(std::string_view input, std::string_view output);
+// Folders inside the inputs that could not be listed (the run log names them).
+std::string folders_unreadable(int count);
 
 // Why the software encoder was chosen. Each is a complete sentence.
 std::string sw_no_gpu();                                              // nothing usable found

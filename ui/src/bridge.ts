@@ -61,9 +61,25 @@ export interface ProgressEvent {
   eta: number           // seconds; -1 when unknown
 }
 
+/**
+ * Paths handed to the app by the OS: command line, a second launch, "Open
+ * with", or a drop. C++ has already sorted them: `paths` are existing folders
+ * and audio/video files, `rejected` is everything else.
+ */
+export interface InputsEvent {
+  type: 'inputs'
+  paths: string[]
+  rejected: string[]
+  source: 'cmdline' | 'relaunch' | 'openWith' | 'drop'
+  append: boolean       // add to the current list instead of replacing it
+}
+
 export type EngineEvent =
-  | { type: 'log'; text: string }
+  // `paths`, when present, are the exact paths inside `text`; without it the
+  // UI recognises the engine's messages by their wording (logText.ts).
+  | { type: 'log'; text: string; paths?: string[] }
   | ProgressEvent
+  | InputsEvent
   | {
       type: 'finished'
       converted: number
@@ -71,6 +87,8 @@ export type EngineEvent =
       skipped: number
       failed: number
       cancelled: boolean
+      notMedia: number      // files given directly that are not audio/video
+      missing: number       // inputs that did not exist
     }
 
 /**
@@ -122,7 +140,22 @@ function mockInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
       return reply({ ffmpegFound: true, ffmpeg: '(mock)', running: false, logDir: '(mock)' })
 
     case 'pickFolder':
-      return reply({ cancelled: false, path: 'C:\\نمونه\\ویدیوها' })
+      return reply({ cancelled: false, path: 'C:\\نمونه\\ویدیوها', paths: ['C:\\نمونه\\ویدیوها'] })
+
+    case 'pickFiles':
+      return reply({
+        cancelled: false,
+        paths: ['C:\\نمونه\\ویدیوها\\clip.mkv', 'C:\\نمونه\\صدا\\song.mp3'],
+        rejected: [],
+      })
+
+    // A browser cannot see where a dropped file lives, so any drop yields the
+    // same mixed sample -- enough to exercise the list and the rejected log.
+    case 'takeDroppedPaths':
+      return reply({
+        paths: ['C:\\نمونه\\ویدیوها', 'C:\\نمونه\\clip.mp4', 'C:\\نمونه\\song.wav'],
+        rejected: ['C:\\نمونه\\notes.txt'],
+      })
 
     case 'parseSize': {
       const text = String(args.text ?? '')
@@ -141,6 +174,8 @@ function mockInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
         skipped: 0,
         failed: 0,
         cancelled: true,
+        notMedia: 0,
+        missing: 0,
       })
       return reply({})
 
@@ -178,6 +213,8 @@ function mockInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
             skipped: 0,
             failed: 0,
             cancelled: false,
+            notMedia: 0,
+            missing: 0,
           })
         }
       }, 200)

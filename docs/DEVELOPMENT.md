@@ -16,7 +16,9 @@ ui/          Vue 3 frontend; `npm run build` emits ui/dist
 tools/       convctl, a command-line harness for the engine (not shipped)
 installer/   NSIS script for the Windows installer (per-user, no elevation)
 scripts/     build.ps1 (Windows) and fetch-ffmpeg.sh (all platforms)
-cmake/       DownloadCEF.cmake -- fetches the pinned CEF on first configure
+cmake/       DownloadCEF.cmake -- fetches the pinned CEF on first configure;
+             CheckMediaExtensions.cmake -- keeps the OS file registrations in
+             step with the engine's extension list
 ```
 
 ## Prerequisites
@@ -117,9 +119,37 @@ convctl bench <encoder> [ffmpeg args]    steady-state throughput of one encoder
 convctl quote                            Windows argv quoting self-test
 convctl size [values...]                 size parsing (built-in table if none)
 convctl probe <file>                     streams, per-track loudness, stereo pairs
-convctl run <dir> [--out <dir>] [--size 1GB | --level medium]
-           [--fast] [--skip] [--cpu] [--cancel-after <s>]
+convctl plan <paths...> [--out <dir>] [--replace]
+                                         what a run would do, without ffmpeg
+convctl run <paths...> [--out <dir>] [--replace] [--size 1GB | --level medium]
+            [--fast] [--skip] [--cpu] [--cancel-after <s>]
 ```
+
+`<paths...>` is any mix of folders and audio/video files, in the order the app
+would receive them, and flags can go anywhere; an unknown flag is an error.
+Without `--out` (or with `--replace`) files are replaced in place, as in the
+app's Replace mode. On Windows convctl takes its arguments as UTF-16 (`wmain`),
+so Persian paths work from any console.
+
+`plan` prints what `run` would do with the same arguments. It calls the
+engine's own `plan_inputs`, so this is exactly what the app would do:
+
+```
+convctl plan D:\Day1 D:\Day2\Day1 D:\notes.txt --out D:\out
+
+plan: 3 media file(s)
+  D:\Day1\a.mkv -> D:\out\Day1\a.mp4
+  D:\Day1\a.mov -> D:\out\Day1\a (2).mp4 [renamed]
+  D:\Day2\Day1\b.mp4 -> D:\out\Day1 (2)\b.mp4
+missing: 0
+not media: 1
+  D:\notes.txt
+duplicates: 0
+ignored in folders: 0
+excluded (inside output folder): 0
+```
+
+The release workflow greps these lines, so keep their shape.
 
 ## Releasing
 
@@ -129,12 +159,13 @@ convctl run <dir> [--out <dir>] [--size 1GB | --level medium]
 3. Commit, then tag and push:
 
    ```sh
-   git tag v2.0.1 && git push origin v2.0.1
+   git tag v2.1.0 && git push origin v2.1.0
    ```
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) builds all
-four packages, runs the engine tests on each, and publishes the release with a
-`SHA256SUMS.txt`. Running the workflow by hand from the Actions tab builds the
+four packages, runs the engine tests on each, checks on Linux that the app
+makes no network connections, lints the macOS Info.plist, and publishes the
+release with a `SHA256SUMS.txt`. Running the workflow by hand from the Actions tab builds the
 packages without publishing.
 
 | Platform | Runner | Package |
@@ -195,6 +226,145 @@ tracks that both qualify and sit within 8 dB of each other are joined into one
 stereo stream — aligned pairs (1-2, 3-4, …) first, following EBU R48. The
 thresholds live in `AudioDetectionConfig` in `engine/include/conv/types.hpp`.
 
+### Inputs: folders and files
+
+`Settings::inputs` is a list of folders and files, in the order given.
+`plan_inputs()` in `engine/src/job.cpp` turns it into the files to process
+before anything else happens -- before the encoder benchmark, so a run with
+nothing to do costs nothing -- and decides every output name up front:
+
+- Folders are walked recursively and sorted, so the order, and with it any
+  ` (2)` names, is the same on every OS. Links to folders are not followed.
+  A subfolder that cannot be listed is skipped, named in the run log and
+  counted in one line in the UI; the walk carries on with the rest.
+  Non-media files inside folders are counted and left alone; a non-media file
+  given directly is reported, and so is an engine temp file (`*_tmp<hex>`).
+- Files are keyed by canonical path (`path_key`: case-folded with NTFS's rules
+  on Windows, ASCII only on macOS), so a file reached twice -- picked on its
+  own and inside a picked folder -- is processed once, with the folder's
+  layout. A symlink given directly is keyed where it sits, as a folder walk
+  would key it.
+- An output name is taken if an earlier file of this run got it, if it is an
+  input of this run (in Copy mode its own input too: an output folder equal to
+  the input folder never loses an original), or (Replace mode only) if an
+  unrelated file already sits there. Taken names get ` (2)`, ` (3)`, and so
+  on. Files from earlier runs in the output folder are still left to the
+  Overwrite/Skip setting; when several inputs share an output name, Skip says
+  in the UI that the existing file may have come from another of them.
+- `finalize()` checks the disk once more, by file identity (`file_id`), for
+  what keys cannot see (non-ASCII case on macOS, Unicode normalisation, hard
+  links): an output never replaces an input or an earlier result of this run,
+  and in Replace mode never replaces an existing file at all. It takes the
+  next free ` (n)` name instead.
+- In Copy mode a lone input folder maps straight onto the output folder, as
+  it always did. With several inputs each folder gets `out/<its name>/` and
+  loose files go to `out/`; a folder that contributes no files of its own
+  takes no name. An output folder inside an input folder is skipped while
+  walking it, and so is any `out/<name>/` that lies inside an input folder
+  (the output folder being that input folder, say), or every run would
+  convert the previous run's results again, one level deeper.
+
+### Where inputs come from
+
+Besides the page's own pickers, four routes deliver paths. All of them end in
+`Bridge::DeliverInputs`, which keeps existing folders and existing files with
+a media extension and sends the page an `inputs` event:
+
+| Route | Code | `source` |
+|---|---|---|
+| Command line at first launch (Explorer "Open with", Linux `%F`, a terminal) | `OnContextInitialized` via `paths_from_command_line` | `cmdline` |
+| A second launch while the app runs | `OnAlreadyRunningAppRelaunch` | `relaunch` |
+| Finder "Open With" and Dock drops (macOS) | `application:openURLs:` in `main_mac.mm` | `openWith` |
+| Files dropped on the window | `OnDragEnter` stores the paths; the page collects them on drop with `takeDroppedPaths` | `drop` |
+
+CEF's process singleton, keyed on `root_cache_path`, forwards a second
+launch's command line to the running process and makes the new one exit with
+code 24 (`CEF_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED`), which the entry
+points turn into 0. Explorer starts one process per selected file, so
+deliveries less than 1.5 s apart are appended to one list instead of each
+replacing the last.
+
+The operating systems learn about the app from the installer (a ProgID listed
+under each extension's `OpenWithProgids`, never an extension's default; a
+folder verb; a Send To shortcut), `Info.plist` (document types) and the
+`.desktop` file (MIME types). The extension lists live in
+`engine/src/util.cpp`; `cmake/CheckMediaExtensions.cmake` fails the configure
+when a registration falls out of step with them.
+
+### Offline
+
+The app makes no network contact of its own. The layers overlap on purpose;
+all of them are tables at the top of `app/src/app.cc`, each entry with the
+reason it exists.
+
+- **Switches**, active from process start: `disable-background-networking`,
+  `disable-component-update`, `disable-domain-reliability`, `disable-sync`,
+  `no-pings`, `no-proxy-server` and a few more.
+- **Features**, merged into `--disable-features` (see the gotcha below):
+  network time, which `disable-background-networking` does not cover; AI Mode
+  eligibility; the Optimization Guide; Media Router / Cast discovery; Autofill
+  server queries.
+- **Preferences**, set in `OnContextInitialized` before the browser exists:
+  spell-check and its dictionary download, Safe Browsing, suggestions,
+  translate, network prediction and the like on the profile (saved in
+  `cef-cache/Default/Preferences`, and set again on every launch so that a
+  profile from an older version is corrected too); network time, component
+  updates and DNS-over-HTTPS in `Local State`. A preference Chromium rejects
+  is logged to `cef.log` and skipped.
+- **`host-resolver-rules=MAP * ^NOTFOUND`**: every hostname lookup inside
+  Chromium fails. The page comes from `app://` through a scheme handler and
+  needs no DNS, so this catches whatever the lists miss. It cannot stop
+  IP-literal connections or LAN multicast; the features do that. Caret, not
+  tilde: Chromium 151 only knows `^NOTFOUND`.
+- **No Chrome UI**: the app runs the Chrome runtime with an Alloy-style
+  window and browser (`BrowserViewDelegate` and `WindowDelegate` in `app.cc`),
+  so there are no Chrome shortcuts, menus or tabs. The context menu keeps only
+  edit items (`OnBeforeContextMenu`), so no "Search Google for", Translate or
+  Lens. `OnChromeCommand`'s deny-list and `OnOpenURLFromTab` are guards
+  behind that. `GetDefaultClient` returns a `StrayBrowserClient` that closes any
+  window Chrome opens by itself, and the macOS Dock menu offers no New Window.
+  `OnBeforeBrowse` cancels every navigation outside `app://converter/`,
+  `OnBeforePopup` cancels every popup, and the relaunch handler always returns
+  true. Chrome-style windows (a New Tab Page opened by a relaunch or a
+  shortcut) caused several of the Google contacts found in a 2.0 profile.
+
+ffmpeg is a separate process and is only ever given existing local files.
+
+To check on Linux, with a fresh profile:
+
+```sh
+export XDG_DATA_HOME=$(mktemp -d)                  # user_data_dir() follows it
+strace -f -e trace=connect,sendto,sendmsg,sendmmsg -o /tmp/vc.strace ./converter
+grep -E 'sa_family=AF_INET6?\b' /tmp/vc.strace     # expect nothing
+```
+
+The sends are traced because mDNS and SSDP multicast go out with `sendto()` on
+an unconnected socket and never call `connect()`. The grep matches only a
+destination address; a bare `AF_INET` would also match the netlink requests
+strace decodes. Media Router discovery starts on demand, so an idle run shows
+only that nothing happens at startup; the Media Router features stay the real
+guard against it.
+
+Optionally, run with no network at all; the app must work the same:
+
+```sh
+unshare -rn ./converter
+```
+
+That needs unprivileged user namespaces, which Ubuntu 23.10 and later block
+through AppArmor. Allow them for the session with
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, and set it
+back to `1` afterwards.
+
+The release workflow runs the strace check for 30 s under `xvfb-run`; it does
+not use `unshare`, for the reason above. On
+Windows, Process Monitor filtered to `converter.exe`, with Operation beginning
+with TCP or UDP, should show nothing. Move
+`%LOCALAPPDATA%\VideoConverter\cef-cache` aside first: a profile from an older
+version may already hold Google state. On any platform,
+`--log-net-log=vc.json --net-log-capture-mode=Everything` gives Chromium's own
+view.
+
 ## Lessons from the first field test
 
 **"RTX 3050 rejected as too slow."** Two causes behind one misleading message.
@@ -222,8 +392,48 @@ stereo pairing exists.
 - MSVC needs `/EHsc`. CEF compiles with `_HAS_EXCEPTIONS=0`; we remove that
   define, and without `/EHsc` the STL assumes exceptions while the compiler
   emits no unwind code.
-- Never `AppendSwitchWithValue("disable-features", ...)` — it replaces CEF's own
-  feature list and CEF crashes at start-up.
+- Never write `--disable-features` over its existing value. CEF has already put
+  its own list there (GlicActorUi, LensOverlay, ...) by the time
+  `OnBeforeCommandLineProcessing` runs, and appending the switch again
+  replaces the value outright -- CEF's list is lost and CEF crashes at
+  start-up. Read it, add what is missing, `RemoveSwitch`, append:
+  `merge_disabled_features` in `app.cc`.
+- `OnAlreadyRunningAppRelaunch` must return true, always -- with no paths, and
+  before the window exists too. `false` makes Chrome open a default-styled
+  window of its own in the running process: unmanaged, able to browse, with a
+  New Tab Page that talks to Google and a "Restore pages?" bubble.
+- The page's `drop` event only carries file names. The full paths exist only
+  in `CefDragHandler::OnDragEnter`, which stores them for `takeDroppedPaths`
+  and must return false, or the page never sees the drag. CEF calls
+  `OnDragEnter` only for Alloy-style browsers (`AlloyBrowserHostImpl`); a
+  Chrome-style browser's drags never reach CEF. That is why `app.cc`'s
+  `BrowserViewDelegate::GetBrowserRuntimeStyle` and
+  `WindowDelegate::GetWindowRuntimeStyle` return `CEF_RUNTIME_STYLE_ALLOY`,
+  and they must stay that way. The page must
+  `preventDefault()` both `dragover` and `drop`, or Chromium navigates to the
+  file (which `OnBeforeBrowse` then cancels).
+- The file picker passes no `accept_filters` on purpose. CEF 151 drops the
+  documented `"description|.ext;.ext"` form, a `;`-joined list becomes one
+  broken pattern, and plain extensions (`".mp4"`, `".mkv"`, ...) become one
+  dialog entry per extension with the first pre-selected -- the picker would
+  open showing `.mp4` files only. Showing every file and rejecting non-media
+  picks in the reply is the honest option. On Linux the dialog comes from the
+  desktop portal over the session bus; with no session bus (bare Xvfb tests)
+  `RunFileDialog` shows nothing, in either runtime style.
+- `--password-store=basic` must stay: without it Chromium on Linux asks the
+  desktop keyring for a key at start-up and pops up "Choose password for new
+  keyring" wherever none is unlocked.
+- Events sent before the page subscribes are dropped by `Emit`. Command-line
+  and relaunch paths arrive before Vue has mounted, so `inputs` events go
+  through `EmitOrBuffer` and are flushed after `subscribe`, from a posted task:
+  never call `Success()` on the subscribe query from inside its own `OnQuery`.
+- Pass a navigation to the message router's `OnBeforeBrowse` only if it goes
+  ahead. Told about a cancelled one, the router drops the page's event
+  subscription.
+- macOS: `NSApp.delegate` can only be replaced after `CefInitialize`, because
+  Chrome checks it is nil and installs its own `AppController` during start-up.
+  Ours forwards every selector it does not implement to that one. Without it,
+  Chrome's delegate would open Finder's files as `file://` tabs.
 - `file(GLOB_RECURSE ... index.html)` also matches `ui/dist/index.html`, the UI
   build's own output, which creates a dependency cycle.
 - On macOS, `MACOSX_BUNDLE_INFO_PLIST` is expanded with global variables at the
@@ -240,5 +450,7 @@ stereo pairing exists.
 |---|---|---|---|
 | Entry point | `main_win.cc` | `main_posix.cc` | `main_mac.mm` + `main_mac_helper.cc` |
 | Paths | `platform_win.cc` | `platform_posix.cc` | `platform_posix.cc` |
+| Opened files | `launch_paths.cc` + relaunch | `launch_paths.cc` + relaunch | `application:openURLs:` + `launch_paths.cc` |
+| Open with | installer: OpenWithProgids, folder verb, Send To | `.desktop` MimeType, `%F` | Info.plist document types |
 | GPU discovery | DXGI + benchmark | encoder probe + benchmark | encoder probe + benchmark |
 | Package | NSIS installer, portable zip | `.tar.gz` + `install.sh` | `.dmg` |

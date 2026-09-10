@@ -1,10 +1,12 @@
 #include "conv/util.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstdio>
+#include <cstring>
+#include <cwctype>
+#include <iterator>
 #include <random>
 #include <string_view>
 #include <system_error>
@@ -13,6 +15,8 @@
 
 #ifdef _WIN32
 #  include <windows.h>
+#else
+#  include <sys/stat.h>
 #endif
 
 namespace conv {
@@ -187,31 +191,45 @@ std::string lower_extension(const std::filesystem::path& p) {
     return ext;
 }
 
+// The tables live here, at namespace scope, so the predicates and the lists
+// handed to the file picker are the same data and cannot drift apart.
+// cmake/CheckMediaExtensions.cmake parses the first two arrays to check the OS
+// registrations against them (the pseudo-extensions below are never
+// registered): keep one plain string literal per entry, and no comments inside
+// the braces.
+constexpr std::string_view kVideoExtensions[] = {
+    "mp4", "avi", "mkv", "mov", "flv", "wmv", "mxf",
+    "gxf", "lxf", "webm", "3gp", "ts", "m2ts", "ogv",
+};
+
+// The last five are the corrected spellings of four entries in the original
+// list that were codec names rather than extensions:
+//     musepack -> mpc          atrac -> oma (also .aa3)
+//     wavpack  -> wv           alac  -> m4a
+constexpr std::string_view kAudioExtensions[] = {
+    "mp3", "aac", "wav", "flac", "ogg", "opus", "wma", "amr", "ape",
+    "aiff", "aif", "au", "pcm",
+    "mpc", "oma", "aa3", "wv", "m4a",
+};
+
+// The original codec-name spellings. Still accepted, since they cost nothing
+// and removing them could only ever lose a match, but no file really carries
+// them, so they are kept out of audio_extensions().
+constexpr std::string_view kAudioPseudoExtensions[] = { "atrac", "musepack", "alac", "wavpack" };
+
+std::span<const std::string_view> video_extensions() { return kVideoExtensions; }
+std::span<const std::string_view> audio_extensions() { return kAudioExtensions; }
+
 bool is_video_extension(std::string_view e) {
-    static constexpr std::array kVideo{
-        "mp4", "avi", "mkv", "mov", "flv", "wmv", "mxf",
-        "gxf", "lxf", "webm", "3gp", "ts", "m2ts", "ogv",
-    };
-    return std::find(kVideo.begin(), kVideo.end(), e) != kVideo.end();
+    return std::find(std::begin(kVideoExtensions), std::end(kVideoExtensions), e) !=
+           std::end(kVideoExtensions);
 }
 
 bool is_audio_extension(std::string_view e) {
-    // Four entries in the original list were codec names rather than the
-    // extensions those codecs actually use, so they could never match a real
-    // file. Corrected here:
-    //     musepack -> mpc          atrac -> oma (also .aa3)
-    //     wavpack  -> wv           alac  -> m4a
-    // The codec-name spellings are kept alongside, since they cost nothing and
-    // removing them could only ever lose a match.
-    static constexpr std::array kAudio{
-        "mp3", "aac", "wav", "flac", "ogg", "opus", "wma", "amr", "ape",
-        "aiff", "aif", "au", "pcm",
-        // corrected spellings
-        "mpc", "oma", "aa3", "wv", "m4a",
-        // originals, harmless
-        "atrac", "musepack", "alac", "wavpack",
-    };
-    return std::find(kAudio.begin(), kAudio.end(), e) != kAudio.end();
+    return std::find(std::begin(kAudioExtensions), std::end(kAudioExtensions), e) !=
+               std::end(kAudioExtensions) ||
+           std::find(std::begin(kAudioPseudoExtensions), std::end(kAudioPseudoExtensions), e) !=
+               std::end(kAudioPseudoExtensions);
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +253,25 @@ std::filesystem::path make_temp_sibling(const std::filesystem::path& target,
     return out;
 }
 
+bool is_temp_sibling(const std::filesystem::path& p) {
+    // Mirrors make_temp_sibling above: "<stem>_tmp" + 8 lowercase hex digits,
+    // and only ever .mp4 or .mp3 (the two outputs the engine writes).
+    constexpr std::string_view kMarker = "_tmp";
+    constexpr size_t kTokenDigits = 8;
+
+    const std::string ext = lower_extension(p);
+    if (ext != "mp4" && ext != "mp3") return false;
+
+    const std::string stem = path_to_utf8(p.stem());
+    if (stem.size() < kMarker.size() + kTokenDigits) return false;
+    const std::string_view tail = std::string_view(stem).substr(stem.size() - kTokenDigits);
+    const std::string_view marker =
+        std::string_view(stem).substr(stem.size() - kTokenDigits - kMarker.size(), kMarker.size());
+    return marker == kMarker && std::all_of(tail.begin(), tail.end(), [](char c) {
+               return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+           });
+}
+
 bool same_path(const std::filesystem::path& a, const std::filesystem::path& b) {
     // If both exist, let the filesystem decide -- this handles hardlinks,
     // junctions and differing-but-equivalent spellings correctly.
@@ -244,14 +281,83 @@ bool same_path(const std::filesystem::path& a, const std::filesystem::path& b) {
         if (!ec) return eq;
     }
 #ifdef _WIN32
-    // Fall back to a case-insensitive comparison of the native strings.
-    std::wstring x = a.native(), y = b.native();
-    if (x.size() != y.size()) return false;
-    return std::equal(x.begin(), x.end(), y.begin(), [](wchar_t l, wchar_t r) {
-        return ::towlower(l) == ::towlower(r);
-    });
+    // Fall back to a case-insensitive comparison of the native strings, with
+    // the operating system's upper-case table -- what NTFS itself uses, so
+    // "Ä.mp4" and "ä.mp4" are one name here as they are on disk. towlower in
+    // the C locale folds ASCII only.
+    const std::wstring& x = a.native();
+    const std::wstring& y = b.native();
+    return ::CompareStringOrdinal(x.data(), static_cast<int>(x.size()), y.data(),
+                                  static_cast<int>(y.size()), TRUE) == CSTR_EQUAL;
 #else
     return a.native() == b.native();
+#endif
+}
+
+std::string path_key(const std::filesystem::path& p) {
+    std::filesystem::path n = p.lexically_normal();
+    n.make_preferred();
+#ifdef _WIN32
+    // Upper case by the file system's rules (LCMapStringEx without
+    // LCMAP_LINGUISTIC_CASING), matching same_path's fallback, so the two never
+    // disagree and a non-ASCII letter's case cannot make two keys for one file.
+    std::wstring w = n.native();
+    if (!w.empty()) {
+        const int len = ::LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, w.data(),
+                                        static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr, 0);
+        std::wstring up(static_cast<size_t>(len > 0 ? len : 0), L'\0');
+        if (len > 0 && ::LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, w.data(),
+                                       static_cast<int>(w.size()), up.data(), len, nullptr,
+                                       nullptr, 0) == len) {
+            w = std::move(up);
+        } else {
+            std::transform(w.begin(), w.end(), w.begin(),
+                           [](wchar_t c) { return static_cast<wchar_t>(::towupper(c)); });
+        }
+    }
+    return path_to_utf8(std::filesystem::path(std::move(w)));
+#else
+    std::string s = n.native();
+#  ifdef __APPLE__
+    // ASCII only: Persian has no case, and folding other scripts the way APFS
+    // does would need ICU. A pair that differs only in a non-ASCII letter's
+    // case is therefore treated as two names.
+    std::transform(s.begin(), s.end(), s.begin(), [](char c) {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    });
+#  endif
+    return s;
+#endif
+}
+
+std::optional<FileId> file_id(const std::filesystem::path& p) {
+#ifdef _WIN32
+    // No access rights needed for the identity; share everything so a file
+    // another program has open (ffmpeg, a player) can still be asked.
+    const HANDLE h = ::CreateFileW(p.c_str(), 0,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                   OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return std::nullopt;
+    std::optional<FileId> id;
+    // The 128-bit id is the unique one on ReFS; NTFS fills its low half.
+    FILE_ID_INFO full{};
+    BY_HANDLE_FILE_INFORMATION basic{};
+    if (::GetFileInformationByHandleEx(h, FileIdInfo, &full, sizeof(full))) {
+        std::uint64_t high = 0, low = 0;
+        static_assert(sizeof(full.FileId.Identifier) == 16);
+        std::memcpy(&low, full.FileId.Identifier, 8);
+        std::memcpy(&high, full.FileId.Identifier + 8, 8);
+        id = FileId{full.VolumeSerialNumber, high, low};
+    } else if (::GetFileInformationByHandle(h, &basic)) {
+        id = FileId{basic.dwVolumeSerialNumber, 0,
+                    (static_cast<std::uint64_t>(basic.nFileIndexHigh) << 32) | basic.nFileIndexLow};
+    }
+    ::CloseHandle(h);
+    return id;
+#else
+    struct stat st{};
+    if (::stat(p.c_str(), &st) != 0) return std::nullopt;
+    return FileId{static_cast<std::uint64_t>(st.st_dev), 0, static_cast<std::uint64_t>(st.st_ino)};
 #endif
 }
 
