@@ -27,7 +27,7 @@ cmake/       DownloadCEF.cmake -- fetches the pinned CEF on first configure;
 |---|---|---|---|
 | Compiler | Visual Studio 2022 or 2026 with *Desktop development with C++* (Build Tools is enough) | GCC 12+ or Clang 15+ | Xcode command-line tools |
 | CMake 3.24+ and Ninja | included with Visual Studio | `apt install cmake ninja-build` | `brew install cmake ninja` |
-| Node.js 18+ | yes | yes | yes |
+| Node.js 22+ (CI and releases use 26) | yes | yes | yes |
 | Other | Git Bash (for `fetch-ffmpeg.sh`) | `libx11-dev` | — |
 
 Plus [vcpkg](https://github.com/microsoft/vcpkg), with `VCPKG_ROOT` pointing

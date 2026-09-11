@@ -47,11 +47,11 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 26
 
       - name: Version
         id: ver
@@ -65,11 +65,33 @@ jobs:
           fi
           echo "Building $v"
 
+      # Visual Studio's x64 developer environment (cl, link, the Windows SDK)
+      # for every later step: vswhere finds the installation, vcvars64.bat sets
+      # it up, and whatever it added or changed goes to GITHUB_ENV. Done here
+      # rather than with ilammy/msvc-dev-cmd, which still targets the retired
+      # Node.js 20 Actions runtime.
       - name: MSVC environment
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio with the C++ x64 tools was not found' }
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          # A tiny batch file avoids cmd.exe's quoting rules for the path.
+          $cmd = Join-Path $env:RUNNER_TEMP 'vcvars-env.cmd'
+          Set-Content -Path $cmd -Encoding ascii -Value "@call `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul", '@set'
+          $lines = & cmd.exe /d /c $cmd
+          if (-not ($lines -match '^VCToolsInstallDir=')) { throw 'vcvars64.bat did not set up the compiler environment' }
+          $exported = 0
+          foreach ($line in $lines) {
+            if ($line -match '^([^=]+)=(.*)$' -and $before[$Matches[1]] -ne $Matches[2]) {
+              "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              $exported++
+            }
+          }
+          Write-Host "MSVC environment from $vs ($exported variables)"
 
       - name: Build tools
         run: |
@@ -86,7 +108,7 @@ jobs:
           esac
 
       - name: Cache CEF and vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             third_party/cef
@@ -367,7 +389,7 @@ jobs:
           esac
           ls -la "$out"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.platform }}
           path: dist/*
@@ -380,9 +402,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -419,7 +441,7 @@ jobs:
           (cd dist && sha256sum * > SHA256SUMS.txt)
           ls -la dist
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: Video Converter ${{ github.ref_name }}
           body_path: notes.md
