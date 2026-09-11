@@ -34,7 +34,11 @@ sha256_of() {
 
 fetch() {
     echo "  downloading $1"
-    curl -fsSL --retry 4 --retry-delay 3 -o "$2" "$1"
+    # Fail fast and retry anything: a connection that never opens used to hang
+    # for minutes (curl exit 28) and then fail the whole build. A transfer that
+    # stalls below 1 KB/s for a minute counts as failed too.
+    curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
+         --retry 5 --retry-delay 5 --retry-all-errors -o "$2" "$1"
 }
 
 verify() {  # <file> <expected-sha256>
