@@ -110,7 +110,9 @@ Build scripts: https://github.com/BtbN/FFmpeg-Builds"
                $tool.zip  $sum"
         done
         # These builds come without a licence file; the text is simply the GPLv3.
-        fetch "https://www.gnu.org/licenses/gpl-3.0.txt" "$dest/LICENSE.txt"
+        # Copied from the repository rather than downloaded: www.gnu.org once
+        # refused connections for five 75-second attempts and failed a build.
+        cp "$root/scripts/gpl-3.0.txt" "$dest/LICENSE.txt"
 
         provenance="Built by:      ffmpeg.martin-riedl.de, FFmpeg 9.0.1 release
 Archives:      $RIEDL/$path/ffmpeg.zip

@@ -133,18 +133,18 @@ jobs:
           "$VCPKG/vcpkg" install nlohmann-json spdlog fmt --triplet ${{ matrix.triplet }}
 
       # The macOS FFmpeg builds are pinned in scripts/fetch-ffmpeg.sh and come
-      # from a single third-party server that a runner sometimes cannot reach,
-      # so the verified download is cached per platform and fetched again only
-      # when the script (and so the pinned build) changes. Windows and Linux
-      # take the newest FFmpeg 9.0 build from GitHub on purpose and are not
-      # cached.
+      # from a single third-party server, so the verified download is cached
+      # per platform and fetched again only when the script or its bundled
+      # licence text changes -- one less outside server every build depends on.
+      # Windows and Linux take the newest FFmpeg 9.0 build from GitHub on
+      # purpose and are not cached.
       - name: Cache FFmpeg (macOS)
         id: ffcache
         if: runner.os == 'macOS'
         uses: actions/cache@v6
         with:
           path: third_party/ffmpeg
-          key: ffmpeg-${{ matrix.platform }}-${{ hashFiles('scripts/fetch-ffmpeg.sh') }}
+          key: ffmpeg-${{ matrix.platform }}-${{ hashFiles('scripts/fetch-ffmpeg.sh', 'scripts/gpl-3.0.txt') }}
 
       # Through bash explicitly: Git on Windows does not record the executable
       # bit, so the script cannot be relied on to be directly runnable.
